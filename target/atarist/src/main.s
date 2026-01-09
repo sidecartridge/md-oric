@@ -136,7 +136,7 @@ check_commands		macro
 first:
 ;	dc.l second
 	dc.l 0
-	dc.l $01000000 + pre_auto		; After GEMDOS init (before booting from disks)
+	dc.l $08000000 + pre_auto		; After GEMDOS init (before booting from disks)
 	dc.l 0
 	dc.w GEMDOS_TIME 				;time
 	dc.w GEMDOS_DATE 				;date
@@ -254,7 +254,7 @@ start_rom_code:
  	beq.s .loop_low_st ; If no need to refresh, wait for next VBL
 	move.l d0, 2(a6)	; Update the last refreshed framebuffer value
 	tst.l d0 		; Check which framebuffer is active
-	beq.s .fb_b
+	bne.s .fb_b
 .fb_a:
 	move.b  #(SCREEN_B_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
 	move.b  #((SCREEN_B_BASE_ADDR >> 8) & 8), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
@@ -268,12 +268,6 @@ start_rom_code:
 	lea FRAMEBUFFER_A_ADDR, a0
 	move.w #ORIC_LINES-1, d7		; Number of lines to copy
 .copy_planes:
-;	rept ORIC_WORDS_PER_LINE
-;	move.l (a0)+, (a1)+
-;	move.w (a0)+, (a1)+
-;	addq.w #2, a1
-;	endr
-
 	move.l (a0)+, (a1)
 	move.w (a0)+, 4(a1)
 	move.l (a0)+, 8(a1)
@@ -398,23 +392,10 @@ start_rom_code:
 
 lowres_only:
 	print lowres_only_txt
-
-boot_gem:
-	move.w	#$2300,sr			;Interrupts back on
-
-	; If we get here, continue loading GEM
-	; Set the screen memory address to the framebuffer 
-	move.l #SCREEN_B_BASE_ADDR, d0
-	move.w #-1, -(sp);  ; No change res
-	move.l d0, -(sp)
-	move.l d0, -(sp)
-	move.w #5,-(sp)		; Set the function number to 3 (set screen base)
-	trap #14			; Call XBIOS
-	lea 12(sp), sp		; Clean the stack
     rts
 
 lowres_only_txt: 
-	dc.b "Oric only supports low res",$d,$a
+	dc.b "Oric Emulator only supports low res",$d,$a
 	dc.b 0
 
 	even
