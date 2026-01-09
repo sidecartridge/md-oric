@@ -81,6 +81,21 @@ typedef struct {
 } state_t;
 
 state_t __not_in_flash() state;
+static volatile uint32_t oric_msg_until_us;
+static char oric_msg_buf[32];
+
+#ifndef ORIC_MSG_DISPLAY_SECONDS
+#define ORIC_MSG_DISPLAY_SECONDS 3u
+#endif
+
+static void oric_set_loading_msg(uint8_t fkey) {
+  if (fkey < 1 || fkey > 10) {
+    return;
+  }
+  (void)snprintf(oric_msg_buf, sizeof(oric_msg_buf), "Loading F%u file...",
+                 (unsigned)fkey);
+  oric_msg_until_us = time_us_32() + (ORIC_MSG_DISPLAY_SECONDS * 1000u * 1000u);
+}
 
 static inline void flash_set_baud_div(uint16_t div) {
   if (div < 2) div = 2;
@@ -179,8 +194,10 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
     case 0x140:  // F7
     case 0x141:  // F8
     case 0x142:  // F9
+    case 0x143:  // F10
     {
       uint8_t index = code - 0x13A;
+      oric_set_loading_msg((uint8_t)(index + 1));
       int num_nib_images = CHIPS_ARRAY_SIZE(oric_nib_images);
       if (index < num_nib_images) {
         if (sys->fdc.valid) {
@@ -233,7 +250,15 @@ void __not_in_flash_func(core1_main()) {
   while (1) {
     uint32_t now_us = time_us_32();
     if ((int32_t)(now_us - next_update_us) >= 0) {
-      (void)oric_screen_update(&state.oric);
+      uint32_t until_us = oric_msg_until_us;
+      if (until_us != 0 && (int32_t)(until_us - now_us) > 0) {
+        oric_show_msg(&state.oric, oric_msg_buf);
+      } else {
+        if (until_us != 0) {
+          oric_msg_until_us = 0;
+        }
+        (void)oric_screen_update(&state.oric);
+      }
       next_update_us = now_us + 19968;
     }
   }
@@ -242,9 +267,6 @@ void __not_in_flash_func(core1_main()) {
 
 int __not_in_flash_func(oric_main)() {
   int rom_load_result = load_oric_rom_from_sd();
-  if (rom_load_result != ORIC_ROM_LOAD_OK) {
-    DPRINTF("rom.img load error: %d\n", rom_load_result);
-  }
 
   // SAFEGUARD START: Init translation table for Oric
   kbdmap_initOric();
@@ -276,6 +298,18 @@ int __not_in_flash_func(oric_main)() {
           1);  // specify that the stream should be unbuffered
 #endif
   DPRINTF("Changed to %u kHz: %s\n", khz_speed, changed_khz ? "yes" : "no");
+
+  if (rom_load_result != ORIC_ROM_LOAD_OK) {
+    DPRINTF("rom.img load error: %d\n", rom_load_result);
+    oric_show_msg(&state.oric, "NO ROM FOUND");
+    while (1) {
+      state.oric.fb_toggle ^= 1u;
+      uint8_t *fb_base = (uint8_t *)&__rom_in_ram_start__;
+      uint32_t *fb_toggle_fb = (uint32_t *)(fb_base + 0x0FFC);
+      *fb_toggle_fb = state.oric.fb_toggle ? 0xFFFFFFFF : 0x0;
+      sleep_ms(1000);
+    }
+  }
 
   DPRINTF("Core 1 start\n");
   multicore_launch_core1(core1_main);

@@ -190,6 +190,7 @@ uint32_t oric_save_snapshot(oric_t* sys, oric_t* dst);
 bool oric_load_snapshot(oric_t* sys, uint32_t version, oric_t* src);
 
 int __not_in_flash_func(oric_screen_update)(oric_t* sys);
+void oric_show_msg(oric_t* sys, const char* msg);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -208,6 +209,7 @@ static uint8_t _oric_psg_in(int port_id, void* user_data);
 static void _oric_init_memorymap(oric_t* sys);
 static void _oric_init_key_map(oric_t* sys);
 static void build_oric_pat_lut(void);
+static uint8_t oric_no_rom_glyph_row(char c, int row);
 
 #define PATTR_50HZ (0x02)
 #define PATTR_HIRES (0x04)
@@ -499,6 +501,216 @@ static void build_oric_pat_lut(void) {
       oric_pat_lut[pat][b] = (pat & (0x20 >> b)) ? 1 : 0;
     }
   }
+}
+
+static uint8_t oric_no_rom_glyph_row(char c, int row) {
+  if (c >= 'a' && c <= 'z') {
+    c = (char)(c - 'a' + 'A');
+  }
+  switch (c) {
+    case 'A': {
+      static const uint8_t glyph[8] = {
+          0x1E, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x33, 0x00};
+      return glyph[row & 7];
+    }
+    case 'E': {
+      static const uint8_t glyph[8] = {
+          0x3F, 0x30, 0x30, 0x3E, 0x30, 0x30, 0x3F, 0x00};
+      return glyph[row & 7];
+    }
+    case 'G': {
+      static const uint8_t glyph[8] = {
+          0x1E, 0x33, 0x30, 0x37, 0x33, 0x33, 0x1E, 0x00};
+      return glyph[row & 7];
+    }
+    case 'I': {
+      static const uint8_t glyph[8] = {
+          0x3F, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F, 0x00};
+      return glyph[row & 7];
+    }
+    case 'L': {
+      static const uint8_t glyph[8] = {
+          0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3F, 0x00};
+      return glyph[row & 7];
+    }
+    case 'N': {
+      static const uint8_t glyph[8] = {
+          0x33, 0x3B, 0x37, 0x37, 0x33, 0x33, 0x33, 0x00};
+      return glyph[row & 7];
+    }
+    case 'O': {
+      static const uint8_t glyph[8] = {
+          0x1E, 0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x00};
+      return glyph[row & 7];
+    }
+    case 'R': {
+      static const uint8_t glyph[8] = {
+          0x3C, 0x33, 0x33, 0x3C, 0x36, 0x33, 0x33, 0x00};
+      return glyph[row & 7];
+    }
+    case 'M': {
+      static const uint8_t glyph[8] = {
+          0x33, 0x3F, 0x37, 0x33, 0x33, 0x33, 0x33, 0x00};
+      return glyph[row & 7];
+    }
+    case 'F': {
+      static const uint8_t glyph[8] = {
+          0x3F, 0x30, 0x30, 0x3E, 0x30, 0x30, 0x30, 0x00};
+      return glyph[row & 7];
+    }
+    case 'U': {
+      static const uint8_t glyph[8] = {
+          0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x00};
+      return glyph[row & 7];
+    }
+    case 'D': {
+      static const uint8_t glyph[8] = {
+          0x3C, 0x33, 0x33, 0x33, 0x33, 0x33, 0x3C, 0x00};
+      return glyph[row & 7];
+    }
+    case '0': {
+      static const uint8_t glyph[8] = {
+          0x1E, 0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x00};
+      return glyph[row & 7];
+    }
+    case '1': {
+      static const uint8_t glyph[8] = {
+          0x0C, 0x1C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F, 0x00};
+      return glyph[row & 7];
+    }
+    case '2': {
+      static const uint8_t glyph[8] = {
+          0x1E, 0x33, 0x03, 0x06, 0x0C, 0x18, 0x3F, 0x00};
+      return glyph[row & 7];
+    }
+    case '3': {
+      static const uint8_t glyph[8] = {
+          0x1E, 0x33, 0x03, 0x0E, 0x03, 0x33, 0x1E, 0x00};
+      return glyph[row & 7];
+    }
+    case '4': {
+      static const uint8_t glyph[8] = {
+          0x06, 0x0E, 0x1E, 0x36, 0x3F, 0x06, 0x06, 0x00};
+      return glyph[row & 7];
+    }
+    case '5': {
+      static const uint8_t glyph[8] = {
+          0x3F, 0x30, 0x3E, 0x03, 0x03, 0x33, 0x1E, 0x00};
+      return glyph[row & 7];
+    }
+    case '6': {
+      static const uint8_t glyph[8] = {
+          0x0E, 0x18, 0x30, 0x3E, 0x33, 0x33, 0x1E, 0x00};
+      return glyph[row & 7];
+    }
+    case '7': {
+      static const uint8_t glyph[8] = {
+          0x3F, 0x03, 0x06, 0x0C, 0x18, 0x18, 0x18, 0x00};
+      return glyph[row & 7];
+    }
+    case '8': {
+      static const uint8_t glyph[8] = {
+          0x1E, 0x33, 0x33, 0x1E, 0x33, 0x33, 0x1E, 0x00};
+      return glyph[row & 7];
+    }
+    case '9': {
+      static const uint8_t glyph[8] = {
+          0x1E, 0x33, 0x33, 0x1F, 0x03, 0x06, 0x1C, 0x00};
+      return glyph[row & 7];
+    }
+    case '.': {
+      static const uint8_t glyph[8] = {
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x00};
+      return glyph[row & 7];
+    }
+    case ' ':
+    default:
+      return 0x00;
+  }
+}
+
+void oric_show_msg(oric_t* sys, const char* msg) {
+  CHIPS_ASSERT(sys && sys->valid);
+  if (!msg || *msg == '\0') {
+    return;
+  }
+  uint16_t* restrict fb = sys->fb;
+  memset(fb, 0, ATARI_ST_FRAMEBUFFER_SIZE_16WORDS * sizeof(uint16_t));
+
+  const int glyph_w = 6;
+  const int glyph_h = 8;
+  const uint8_t fg = 0x07;
+  const int len = (int)strlen(msg);
+  int start_x = (ORIC_SCREEN_WIDTH - (len * glyph_w)) / 2;
+  int start_y = (ORIC_SCREEN_HEIGHT - glyph_h) / 2;
+  if (start_x < 0) start_x = 0;
+  if (start_y < 0) start_y = 0;
+
+  for (int y = 0; y < glyph_h; y++) {
+    int screen_y = start_y + y;
+    if (screen_y >= ORIC_SCREEN_HEIGHT) {
+      break;
+    }
+    memset(line_buff, 0, sizeof(line_buff));
+
+    for (int i = 0; i < len; i++) {
+      uint8_t row_bits = oric_no_rom_glyph_row(msg[i], y);
+      int base_x = start_x + (i * glyph_w);
+      for (int bit = 0; bit < glyph_w; bit++) {
+        if (row_bits & (1u << (glyph_w - 1 - bit))) {
+          int x = base_x + bit;
+          if (x < 0 || x >= ORIC_SCREEN_WIDTH) {
+            continue;
+          }
+          int idx = x >> 1;
+          uint16_t packed = line_buff[idx];
+          if ((x & 1) == 0) {
+            packed = (uint16_t)((packed & 0xFFF0u) | fg);
+          } else {
+            packed = (uint16_t)((packed & 0xF0FFu) | ((uint16_t)fg << 8));
+          }
+          line_buff[idx] = packed;
+        }
+      }
+    }
+
+    uint16_t* restrict dst_line =
+        fb + (screen_y * ATARI_ST_FRAMEBUFFER_LINE_SIZE_16WORDS);
+    for (int word = 0; word < 15; word++) {
+      uint16_t p0 = 0;
+      uint16_t p1 = 0;
+      uint16_t p2 = 0;
+      uint16_t bit = 0x8000;
+      uint16_t* p = dst_line + (word * ATARI_ST_BITCOLORS_PER_PIXEL);
+      int base_word = word * 8;
+
+      for (int i = 0; i < 8; i++) {
+        uint16_t packed = line_buff[base_word + i];
+        uint8_t c0 = packed & 0x0F;
+        uint8_t c1 = (packed >> 8) & 0x0F;
+
+        if (c0 & 0x01) p0 |= bit;
+        if (c0 & 0x02) p1 |= bit;
+        if (c0 & 0x04) p2 |= bit;
+        bit >>= 1;
+
+        if (c1 & 0x01) p0 |= bit;
+        if (c1 & 0x02) p1 |= bit;
+        if (c1 & 0x04) p2 |= bit;
+        bit >>= 1;
+      }
+
+      p[0] = p0;
+      p[1] = p1;
+      p[2] = p2;
+    }
+  }
+
+  sys->fb_toggle ^= 1u;
+  uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
+  uint32_t* fb_toggle_fb = (uint32_t*)(fb_base + 0x0FFC);
+  *fb_toggle_fb = sys->fb_toggle ? 0xFFFFFFFF : 0x0;
+  sys->screen_dirty = false;
 }
 
 int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
