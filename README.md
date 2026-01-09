@@ -34,24 +34,26 @@ plenty of Oric ROM images available online, try searching for "orica.zip" or
 similar. Once you have the ROM image, rename it to `rom.img` and copy it to the
 directory `/oric` on the SidecarTridge microSD card.
 
-This should be enough to get started, but if you want to load applications and games, copy `.TAP` files to the same `/oric` directory with the following structure:
+This should be enough to get started, but if you want to load applications and games, copy `.TAP` or `.WAV` files to the same `/oric` directory with the following structure:
 
-- `0.tap` - first tape file, loaded when pressing the F1 key.
-- `1.tap` - second tape file, loaded when pressing the F2 key.
-- `2.tap` - third tape file, loaded when pressing the F3 key.
+- `f1.tap` or `f1.wav` - second tape file, loaded when pressing the F1 key.
+- `f2.tap` or `f2.wav` - third tape file, loaded when pressing the F2 key.
 - and so on...
 
 Once the files are in place, launch the Oric Emulator app from the Booster interface or by rebooting your Atari with the Multi-device set to auto-launch the app.
 
 ### Emulator Controls
 
-The emulator currently only supports file loading from tape images. Use the
+The emulator currently only supports file loading from tape or wave images. Use the
 following keys to load the corresponding tape files:
 
-* **F1** → Load `0.tap` in the virtual cassette drive.
-* **F2** → Load `1.tap` in the virtual cassette drive.
-* **F3** → Load `2.tap` in the virtual cassette drive.
+* **F1** → Load `f1.tap` or `f1.wav` in the virtual cassette drive.
+* **F2** → Load `f2.tap` or `f2.wav` in the virtual cassette drive.
+* **F3** → Load `f3.tap` or `f3.wav` in the virtual cassette drive.
 * and so on...
+
+If the file is of TAP format, it will convert it to WAV format and will save a copy
+as `fX.wav` in the same directory for future use.
 
 After loading the tape file, use the command `CLOAD""` in the Oric BASIC prompt to load the program from the virtual tape.
 
