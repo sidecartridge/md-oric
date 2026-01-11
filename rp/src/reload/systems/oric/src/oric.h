@@ -108,6 +108,9 @@ extern uint8_t oric_rom[ORIC_ROM_SIZE];
   (ORIC_SCREEN_HEIGHT * ATARI_ST_FRAMEBUFFER_LINE_SIZE_BYTES)
 #define ATARI_ST_FRAMEBUFFER_SIZE_16WORDS (ATARI_ST_FRAMEBUFFER_SIZE_BYTES / 2)
 #define ATARI_ST_FRAMEBUFFERS_OFFSET 0x1000
+#define ATARI_ST_VIA_QUEUE_SIZE_BYTES 512u
+#define ATARI_ST_VIA_QUEUE_OFFSET \
+  (ATARI_ST_FRAMEBUFFERS_OFFSET + ATARI_ST_FRAMEBUFFER_SIZE_BYTES)
 // SAFEGUARD END
 
 // Config parameters for oric_init()
@@ -191,6 +194,7 @@ bool oric_load_snapshot(oric_t* sys, uint32_t version, oric_t* src);
 
 int __not_in_flash_func(oric_screen_update)(oric_t* sys);
 void oric_show_msg(oric_t* sys, const char* msg);
+void oric_ayQueuePush(uint16_t* queue, uint16_t* head, uint16_t value);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -203,6 +207,9 @@ void oric_show_msg(oric_t* sys, const char* msg);
 #include <assert.h>
 #define CHIPS_ASSERT(c) assert(c)
 #endif
+
+extern uint16_t* oric_via_queue;
+extern uint16_t oric_via_queue_head;
 
 static void _oric_psg_out(int port_id, uint8_t data, void* user_data);
 static uint8_t _oric_psg_in(int port_id, void* user_data);
@@ -390,32 +397,10 @@ void __not_in_flash_func(oric_tick)(oric_t* sys) {
 
   _oric_mem_rw(sys, sys->cpu.addr, sys->cpu.rw);
 
-  // // Tick PSG
-  // if ((sys->system_ticks & 63) == 0) {
-  //   ay38910psg_tick_channels(&sys->psg);
-  // }
-
-  // if ((sys->system_ticks & 127) == 0) {
-  //   ay38910psg_tick_envelope_generator(&sys->psg);
-  // }
-
-  // static uint8_t t1 = 0;
-  // t1++;
-  // if (t1 == 46) {
-  //   ay38910psg_tick_sample_generator(&sys->psg);
-  //   if (sys->audio_callback.func) {
-  //     // New sample is ready
-  //     sys->audio_callback.func((uint8_t)((uint8_t)(sys->psg.sample *
-  //     255.0f)),
-  //                              sys->audio_callback.user_data);
-  //   }
-  //   t1 = 0;
-  // }
-
-  // // Tick FDC
-  // if (sys->fdc.valid && (sys->system_ticks & 127) == 0) {
-  //   disk2_fdc_tick(&sys->fdc);
-  // }
+  // Tick FDC
+  if (sys->fdc.valid && (sys->system_ticks & 127) == 0) {
+    disk2_fdc_tick(&sys->fdc);
+  }
 
   // Tick VIA
   if ((sys->system_ticks & 3) == 0) {
@@ -427,6 +412,11 @@ void __not_in_flash_func(oric_tick)(oric_t* sys) {
       if (mos6522via_get_ca2(&sys->via)) {
         ay38910psg_latch_address(&sys->psg, psg_data);
       } else {
+        if (sys->psg.addr < 0xe) {
+          uint16_t packed =
+              (uint16_t)(((uint16_t)sys->psg.addr << 8) | psg_data);
+          oric_ayQueuePush(oric_via_queue, &oric_via_queue_head, packed);
+        }
         ay38910psg_write(&sys->psg, psg_data);
       }
     }
@@ -452,10 +442,10 @@ void __not_in_flash_func(oric_tick)(oric_t* sys) {
       if (motor_state != _last_motor_state) {
         if (motor_state) {
           sys->td.port |= ORIC_TD_PORT_MOTOR;
-          printf("oric: motor on\n");
+          DPRINTF("oric: motor on\n");
         } else {
           sys->td.port &= ~ORIC_TD_PORT_MOTOR;
-          printf("oric: motor off\n");
+          DPRINTF("oric: motor off\n");
         }
         _last_motor_state = motor_state;
       }
@@ -509,118 +499,118 @@ static uint8_t oric_no_rom_glyph_row(char c, int row) {
   }
   switch (c) {
     case 'A': {
-      static const uint8_t glyph[8] = {
-          0x1E, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x33, 0x00};
+      static const uint8_t glyph[8] = {0x1E, 0x33, 0x33, 0x3F,
+                                       0x33, 0x33, 0x33, 0x00};
       return glyph[row & 7];
     }
     case 'E': {
-      static const uint8_t glyph[8] = {
-          0x3F, 0x30, 0x30, 0x3E, 0x30, 0x30, 0x3F, 0x00};
+      static const uint8_t glyph[8] = {0x3F, 0x30, 0x30, 0x3E,
+                                       0x30, 0x30, 0x3F, 0x00};
       return glyph[row & 7];
     }
     case 'G': {
-      static const uint8_t glyph[8] = {
-          0x1E, 0x33, 0x30, 0x37, 0x33, 0x33, 0x1E, 0x00};
+      static const uint8_t glyph[8] = {0x1E, 0x33, 0x30, 0x37,
+                                       0x33, 0x33, 0x1E, 0x00};
       return glyph[row & 7];
     }
     case 'I': {
-      static const uint8_t glyph[8] = {
-          0x3F, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F, 0x00};
+      static const uint8_t glyph[8] = {0x3F, 0x0C, 0x0C, 0x0C,
+                                       0x0C, 0x0C, 0x3F, 0x00};
       return glyph[row & 7];
     }
     case 'L': {
-      static const uint8_t glyph[8] = {
-          0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3F, 0x00};
+      static const uint8_t glyph[8] = {0x30, 0x30, 0x30, 0x30,
+                                       0x30, 0x30, 0x3F, 0x00};
       return glyph[row & 7];
     }
     case 'N': {
-      static const uint8_t glyph[8] = {
-          0x33, 0x3B, 0x37, 0x37, 0x33, 0x33, 0x33, 0x00};
+      static const uint8_t glyph[8] = {0x33, 0x3B, 0x37, 0x37,
+                                       0x33, 0x33, 0x33, 0x00};
       return glyph[row & 7];
     }
     case 'O': {
-      static const uint8_t glyph[8] = {
-          0x1E, 0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x00};
+      static const uint8_t glyph[8] = {0x1E, 0x33, 0x33, 0x33,
+                                       0x33, 0x33, 0x1E, 0x00};
       return glyph[row & 7];
     }
     case 'R': {
-      static const uint8_t glyph[8] = {
-          0x3C, 0x33, 0x33, 0x3C, 0x36, 0x33, 0x33, 0x00};
+      static const uint8_t glyph[8] = {0x3C, 0x33, 0x33, 0x3C,
+                                       0x36, 0x33, 0x33, 0x00};
       return glyph[row & 7];
     }
     case 'M': {
-      static const uint8_t glyph[8] = {
-          0x33, 0x3F, 0x37, 0x33, 0x33, 0x33, 0x33, 0x00};
+      static const uint8_t glyph[8] = {0x33, 0x3F, 0x37, 0x33,
+                                       0x33, 0x33, 0x33, 0x00};
       return glyph[row & 7];
     }
     case 'F': {
-      static const uint8_t glyph[8] = {
-          0x3F, 0x30, 0x30, 0x3E, 0x30, 0x30, 0x30, 0x00};
+      static const uint8_t glyph[8] = {0x3F, 0x30, 0x30, 0x3E,
+                                       0x30, 0x30, 0x30, 0x00};
       return glyph[row & 7];
     }
     case 'U': {
-      static const uint8_t glyph[8] = {
-          0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x00};
+      static const uint8_t glyph[8] = {0x33, 0x33, 0x33, 0x33,
+                                       0x33, 0x33, 0x1E, 0x00};
       return glyph[row & 7];
     }
     case 'D': {
-      static const uint8_t glyph[8] = {
-          0x3C, 0x33, 0x33, 0x33, 0x33, 0x33, 0x3C, 0x00};
+      static const uint8_t glyph[8] = {0x3C, 0x33, 0x33, 0x33,
+                                       0x33, 0x33, 0x3C, 0x00};
       return glyph[row & 7];
     }
     case '0': {
-      static const uint8_t glyph[8] = {
-          0x1E, 0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x00};
+      static const uint8_t glyph[8] = {0x1E, 0x33, 0x33, 0x33,
+                                       0x33, 0x33, 0x1E, 0x00};
       return glyph[row & 7];
     }
     case '1': {
-      static const uint8_t glyph[8] = {
-          0x0C, 0x1C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F, 0x00};
+      static const uint8_t glyph[8] = {0x0C, 0x1C, 0x0C, 0x0C,
+                                       0x0C, 0x0C, 0x3F, 0x00};
       return glyph[row & 7];
     }
     case '2': {
-      static const uint8_t glyph[8] = {
-          0x1E, 0x33, 0x03, 0x06, 0x0C, 0x18, 0x3F, 0x00};
+      static const uint8_t glyph[8] = {0x1E, 0x33, 0x03, 0x06,
+                                       0x0C, 0x18, 0x3F, 0x00};
       return glyph[row & 7];
     }
     case '3': {
-      static const uint8_t glyph[8] = {
-          0x1E, 0x33, 0x03, 0x0E, 0x03, 0x33, 0x1E, 0x00};
+      static const uint8_t glyph[8] = {0x1E, 0x33, 0x03, 0x0E,
+                                       0x03, 0x33, 0x1E, 0x00};
       return glyph[row & 7];
     }
     case '4': {
-      static const uint8_t glyph[8] = {
-          0x06, 0x0E, 0x1E, 0x36, 0x3F, 0x06, 0x06, 0x00};
+      static const uint8_t glyph[8] = {0x06, 0x0E, 0x1E, 0x36,
+                                       0x3F, 0x06, 0x06, 0x00};
       return glyph[row & 7];
     }
     case '5': {
-      static const uint8_t glyph[8] = {
-          0x3F, 0x30, 0x3E, 0x03, 0x03, 0x33, 0x1E, 0x00};
+      static const uint8_t glyph[8] = {0x3F, 0x30, 0x3E, 0x03,
+                                       0x03, 0x33, 0x1E, 0x00};
       return glyph[row & 7];
     }
     case '6': {
-      static const uint8_t glyph[8] = {
-          0x0E, 0x18, 0x30, 0x3E, 0x33, 0x33, 0x1E, 0x00};
+      static const uint8_t glyph[8] = {0x0E, 0x18, 0x30, 0x3E,
+                                       0x33, 0x33, 0x1E, 0x00};
       return glyph[row & 7];
     }
     case '7': {
-      static const uint8_t glyph[8] = {
-          0x3F, 0x03, 0x06, 0x0C, 0x18, 0x18, 0x18, 0x00};
+      static const uint8_t glyph[8] = {0x3F, 0x03, 0x06, 0x0C,
+                                       0x18, 0x18, 0x18, 0x00};
       return glyph[row & 7];
     }
     case '8': {
-      static const uint8_t glyph[8] = {
-          0x1E, 0x33, 0x33, 0x1E, 0x33, 0x33, 0x1E, 0x00};
+      static const uint8_t glyph[8] = {0x1E, 0x33, 0x33, 0x1E,
+                                       0x33, 0x33, 0x1E, 0x00};
       return glyph[row & 7];
     }
     case '9': {
-      static const uint8_t glyph[8] = {
-          0x1E, 0x33, 0x33, 0x1F, 0x03, 0x06, 0x1C, 0x00};
+      static const uint8_t glyph[8] = {0x1E, 0x33, 0x33, 0x1F,
+                                       0x03, 0x06, 0x1C, 0x00};
       return glyph[row & 7];
     }
     case '.': {
-      static const uint8_t glyph[8] = {
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x00};
+      static const uint8_t glyph[8] = {0x00, 0x00, 0x00, 0x00,
+                                       0x00, 0x0C, 0x0C, 0x00};
       return glyph[row & 7];
     }
     case ' ':
