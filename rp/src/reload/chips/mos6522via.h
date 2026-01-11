@@ -378,7 +378,7 @@ static void __not_in_flash_func(_mos6522via_tick_t2)(mos6522via_t* c,
   }
 }
 
-inline void _mos6522via_tick_pipeline(mos6522via_t* c) {
+void _mos6522via_tick_pipeline(mos6522via_t* c) {
   // Feed counter pipelines, both counters are always counting
   _MOS6522VIA_PIP_SET(c->t1.pip, MOS6522VIA_PIP_TIMER_COUNT, 2);
   _MOS6522VIA_PIP_SET(c->t2.pip, MOS6522VIA_PIP_TIMER_COUNT, 2);

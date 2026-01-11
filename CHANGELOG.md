@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.1 (2025-12-26) - release
+## v1.0.0beta (2026-01-11) - Beta release
 - First version
 
 ---

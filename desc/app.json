@@ -1,10 +1,11 @@
 {
   "uuid": "<APP_UUID>",
-  "name": "APP DEV Template",
-  "description": "Microfirmware Application Template for Atari ST",
+  "name": "Oric Computer emulator",
+  "description": "A complete Oric 1 and Oric Atmos emulator in your Atari ST/STE/MegaST/MegaSTE.  <a target='_blank' href='https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/oric_emulator/'>Learn more</a>",
   "image": "https://placehold.co/256x256/png",
   "tags": [
-    "Sample",
+    "Emulator",
+    "Oric"
   ],
   "devices": [
     "Atari ST",

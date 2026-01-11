@@ -283,7 +283,7 @@ int __not_in_flash_func(oric_main)() {
   oric_via_queue = (uint16_t *)(fb_base + ATARI_ST_VIA_QUEUE_OFFSET);
   oric_via_queue_head = 0;
 
-  uint32_t khz_speed = 272000;
+  uint32_t khz_speed = 260000;
 
   flash_set_baud_div(khz_speed / 66000);  // Flash at Freq /66MHz
   sleep_us(500);                          // wait for flash to stabilize
