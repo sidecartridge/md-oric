@@ -6,7 +6,7 @@ standard SidecarTridge split between RP2040 firmware (`rp/`) and target-computer
 firmware (`target/atarist/`).
 
 This emulator is based on the [Reload Emulator](https://github.com/vsladkov/reload-emulator)
-project by Vladimir Sladkov. Many thanks for his great work!
+project by Vladimir Sladkov. **Huge thanks** for his great work!
 
 ## ⚠️ Attention
 
@@ -100,6 +100,23 @@ This repository uses Git submodules for external SDKs:
 Maintaining and improving this emulator is a hobby project for me. If you have
 any suggestions or find any issues, please feel free to open an issue on the
 GitHub repository.
+
+### Missing features, future roadmap
+
+This is a solid first release and a fun experiment, but there is plenty of room
+to improve.
+
+- [ ] Better framebuffer. It refreshes at 50 Hz, but shows the previous frame
+  instead of the latest one.
+- [ ] Joystick/gamepad support.
+- [ ] Floppy disk support. I removed it to save CPU cycles, but that is not the
+  right place to cut.
+- [ ] TAP file load menu. The function key solution is functional, but clunky.
+- [ ] Faster framebuffer build. Creating the Atari ST framebuffer from the Oric
+  screen needs to be more efficient.
+- [ ] Performance improvements.
+- [ ] Direct TAP file load. The current code converts to WAV; it works, but is
+  not ideal.
 
 ## License
 
