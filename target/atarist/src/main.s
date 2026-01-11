@@ -26,6 +26,8 @@
 ROM4_ADDR			equ $FA0000
 CENTERED_XPOS		equ 16 ; Centered X position for Oric low res. 16 bytes (32 pixels) margin on left side
 FRAMEBUFFER_A_ADDR	equ (ROM4_ADDR + $1000)
+AYBUFFER_ADDR		equ (FRAMEBUFFER_A_ADDR + (ORIC_LINES*ORIC_WORDS_PER_LINE*2*3)) ; AY sound buffer after the framebuffer
+AYBUFFER_SIZE		equ 512 ; Size of the AY sound buffer in bytes
 COPIED_CODE_OFFSET	equ $00010000 ; The offset should be below the screen memory
 COPIED_CODE_SIZE	equ $00001000
 PRE_RESET_WAIT		equ $0000FFFF ; Wait this many cycles before resetting the computer
@@ -47,6 +49,8 @@ CMD_BOOSTER		      	  equ ($0DEF) 					  ; Booster command
 
 LISTENER_ADDR		      equ (ROM4_ADDR + $5F8)		  ; The address of the listener
 REMOTE_RESET		      equ $1					      ; The device ask to reset the
+
+AYBUFF_POS		          equ $8                          ; Offset of the AY sound buffer position
 
 _dskbufp                  equ $4c6                        ; Address of the disk buffer pointer    
 
@@ -231,10 +235,12 @@ start_rom_code:
 	clr.w (a6)			; Clear VBL flag
 	clr.l 2(a6)			; Clear last refreshed framebuffer value
 	clr.w 6(a6)			; Clear overscan flag
+	clr.w AYBUFF_POS(a6); Clear AY sound buffer position
 
 	move.l #160, d6	; Bytes to add to complete the full ST line
 
 	clr.b VIDEO_BASE_ADDR_LOW.w			; put in low screen address byte
+	clr.w AYBUFF_POS(a6)			; Clear AY sound buffer position
 
 
 .loop_low_st:
@@ -249,6 +255,20 @@ start_rom_code:
 
 ; 	clr.w $FFFF8240.w 	; Set the index 0 color to black
 
+	; Compute the AY sound buffer position
+	lea AYBUFFER_ADDR, a1
+.continue_ay_sound:
+	move.w AYBUFF_POS(a6), d0
+	cmp.w #$FFFF,(a1, d0.w)
+	beq.s .no_ay_sound ; No sound to play
+	move.b 0(a1, d0.w), $FFFF8800.w ; Set AY register to write
+	move.b 1(a1, d0.w), $FFFF8802.w ; Set AY register data
+	addq.w #2, d0
+	and.w #(AYBUFFER_SIZE - 1), d0 ; Wrap around the buffer
+	move.w d0, AYBUFF_POS(a6)
+	bra.s .continue_ay_sound
+
+.no_ay_sound:
 	move.l (ROM4_ADDR + COPIED_CODE_SIZE - 4), d0
 	cmp.l 2(a6), d0
  	beq.s .loop_low_st ; If no need to refresh, wait for next VBL
