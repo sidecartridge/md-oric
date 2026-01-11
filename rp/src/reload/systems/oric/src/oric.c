@@ -36,7 +36,6 @@
 #else
 #include "chips/mos6502cpu.h"
 #endif
-#include "audio.h"
 #include "chips/ay38910psg.h"
 #include "chips/clk.h"
 #include "chips/kbd.h"
@@ -81,6 +80,8 @@ typedef struct {
 } state_t;
 
 state_t __not_in_flash() state;
+uint16_t *oric_via_queue;
+uint16_t oric_via_queue_head;
 static volatile uint32_t oric_msg_until_us;
 static char oric_msg_buf[32];
 
@@ -97,6 +98,16 @@ static void oric_set_loading_msg(uint8_t fkey) {
   oric_msg_until_us = time_us_32() + (ORIC_MSG_DISPLAY_SECONDS * 1000u * 1000u);
 }
 
+inline void oric_ayQueuePush(uint16_t *queue, uint16_t *head, uint16_t value) {
+  const uint16_t queue_words =
+      (uint16_t)(ATARI_ST_VIA_QUEUE_SIZE_BYTES / sizeof(uint16_t));
+  uint16_t idx = *head;
+  queue[idx] = value;
+  uint16_t next_head = (uint16_t)((idx + 1u) & (queue_words - 1u));
+  queue[next_head] = 0xFFFF;
+  *head = next_head;
+}
+
 static inline void flash_set_baud_div(uint16_t div) {
   if (div < 2) div = 2;
   if (div & 1) div++;  // must be even
@@ -106,14 +117,6 @@ static inline void flash_set_baud_div(uint16_t div) {
 uint8_t __attribute__((section(".oric_rom_in_ram")))
 __attribute__((aligned(4))) oric_rom[ORIC_ROM_SIZE] = {0};
 
-// Audio streaming callback
-static void __not_in_flash_func(audio_callback)(const uint8_t sample,
-                                                void *user_data) {
-  (void)user_data;
-  return;
-  audio_push_sample(sample);
-}
-
 // Get oric_desc_t struct based on joystick type
 oric_desc_t oric_desc(void) {
   return (oric_desc_t){
@@ -121,7 +124,7 @@ oric_desc_t oric_desc(void) {
       .fdc_enabled = true,
       .audio =
           {
-              .callback = {.func = audio_callback},
+              .callback = {.func = NULL},
               .sample_rate = 22050,
           },
       .roms =
@@ -276,7 +279,11 @@ int __not_in_flash_func(oric_main)() {
 
   app_init();
 
-  uint32_t khz_speed = 225000;
+  uint8_t *fb_base = (uint8_t *)&__rom_in_ram_start__;
+  oric_via_queue = (uint16_t *)(fb_base + ATARI_ST_VIA_QUEUE_OFFSET);
+  oric_via_queue_head = 0;
+
+  uint32_t khz_speed = 272000;
 
   flash_set_baud_div(khz_speed / 66000);  // Flash at Freq /66MHz
   sleep_us(500);                          // wait for flash to stabilize
