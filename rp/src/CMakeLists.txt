@@ -90,7 +90,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         gconfig.c
         hw_config.c
         kbdmap.c
-        reload/src/audio.c
         reload/systems/oric/src/oric.c
         romemul.c
         sdcard.c
