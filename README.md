@@ -6,7 +6,7 @@ standard SidecarTridge split between RP2040 firmware (`rp/`) and target-computer
 firmware (`target/atarist/`).
 
 This emulator is based on the [Reload Emulator](https://github.com/vsladkov/reload-emulator)
-project by Vladimir Sladkov. **Huge thanks** for his great work!
+project by Veselin Sladkov. **Huge thanks** for his great work!
 
 ## ⚠️ Attention
 
