@@ -269,6 +269,8 @@ void __not_in_flash_func(core1_main()) {
 }
 
 int __not_in_flash_func(oric_main)() {
+  // Erase the ROM area in RAM
+  memset((void *)&__oric_rom_in_ram_start__, 0, 32 * 1024 * sizeof(uint8_t));
   int rom_load_result = load_oric_rom_from_sd();
 
   // SAFEGUARD START: Init translation table for Oric
@@ -282,6 +284,7 @@ int __not_in_flash_func(oric_main)() {
   uint8_t *fb_base = (uint8_t *)&__rom_in_ram_start__;
   oric_via_queue = (uint16_t *)(fb_base + ATARI_ST_VIA_QUEUE_OFFSET);
   oric_via_queue_head = 0;
+  memset(oric_via_queue, 0xFF, ATARI_ST_VIA_QUEUE_SIZE_BYTES);
 
   uint32_t khz_speed = 260000;
 

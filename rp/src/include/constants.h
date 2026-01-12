@@ -9,6 +9,8 @@
 #ifndef CONSTANTS_H
 #define CONSTANTS_H
 
+#include <stdint.h>
+
 #include "hardware/vreg.h"
 
 // Common macros
@@ -85,7 +87,9 @@ extern unsigned int _booster_app_flash_start;
 extern unsigned int _config_flash_start;
 extern unsigned int _global_lookup_flash_start;
 extern unsigned int _global_config_flash_start;
-extern unsigned int __rom_in_ram_start__;
+extern uint8_t __rom_in_ram_start__[];
+extern uint8_t __oric_ram_start__[];
+extern uint8_t __oric_rom_in_ram_start__[];
 // NOLINTEND(readability-identifier-naming)
 
 #endif  // CONSTANTS_H
