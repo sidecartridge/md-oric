@@ -105,10 +105,19 @@ static uint16_t __not_in_flash() kbdmap_st_gsx_to_ascii[128][2] = {
   [0x72] = {'\r', '\r'},  // KEYPAD ENTER
 };
 
+static uint16_t __not_in_flash() kbdmap_st_gsx_to_ascii_ctrl[128] = { 0 };
+
 uint16_t __not_in_flash_func(kbdmap_StGsx2Ascii)(uint16_t scan_code,
-                                                 bool use_upper) {
+                                                 bool use_upper,
+                                                 bool use_ctrl) {
   if (scan_code > 0x7F) {
     return 0;
+  }
+  if (use_ctrl) {
+    uint16_t ctrl_value = kbdmap_st_gsx_to_ascii_ctrl[scan_code];
+    if (ctrl_value != 0) {
+      return ctrl_value;
+    }
   }
   return kbdmap_st_gsx_to_ascii[scan_code][use_upper ? 1 : 0];
 }
@@ -136,6 +145,16 @@ void kbdmap_initOric(void) {
   kbdmap_st_gsx_to_ascii[0x50][1] = 0x151;
   kbdmap_st_gsx_to_ascii[0x48][0] = 0x152;  // UP
   kbdmap_st_gsx_to_ascii[0x48][1] = 0x152;
+
+  // Map Oric control key combinations used by the firmware.
+  kbdmap_st_gsx_to_ascii_ctrl[0x14] = 0x14;  // Ctrl+T
+  kbdmap_st_gsx_to_ascii_ctrl[0x19] = 0x10;  // Ctrl+P
+  kbdmap_st_gsx_to_ascii_ctrl[0x21] = 0x06;  // Ctrl+F
+  kbdmap_st_gsx_to_ascii_ctrl[0x20] = 0x04;  // Ctrl+D
+  kbdmap_st_gsx_to_ascii_ctrl[0x10] = 0x11;  // Ctrl+Q
+  kbdmap_st_gsx_to_ascii_ctrl[0x1F] = 0x13;  // Ctrl+S
+  kbdmap_st_gsx_to_ascii_ctrl[0x26] = 0x0C;  // Ctrl+L
+  kbdmap_st_gsx_to_ascii_ctrl[0x31] = 0x0E;  // Ctrl+N
 }
 
 bool __not_in_flash_func(kbdmap_isShift)(uint16_t scan_code) {

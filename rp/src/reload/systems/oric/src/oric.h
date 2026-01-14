@@ -90,6 +90,9 @@ extern "C" {
 #define ORIC_SCREEN_WIDTH 240   // (240)
 #define ORIC_SCREEN_HEIGHT 224  // (224)
 
+#define ORIC_KEY_CTRL (0x146)
+#define ORIC_KEY_SHIFT (0x147)
+
 // ROM size (16 KB)
 #define ORIC_ROM_SIZE 0x4000u
 extern uint8_t oric_rom[ORIC_ROM_SIZE];
@@ -903,6 +906,8 @@ static void _oric_init_key_map(oric_t* sys) {
   kbd_register_key(&sys->kbd, 0x152, 3, 4, 0);  // Up
   kbd_register_key(&sys->kbd, 0x08, 5, 5, 0);   // Delete
   kbd_register_key(&sys->kbd, 0x0D, 5, 7, 0);   // Return
+  kbd_register_key(&sys->kbd, ORIC_KEY_CTRL, 4, 2, 0);  // Ctrl
+  kbd_register_key(&sys->kbd, ORIC_KEY_SHIFT, 4, 4, 0);  // Shift
 
   kbd_register_key(&sys->kbd, 0x14, 1, 1, 2);  // Ctrl+T
   kbd_register_key(&sys->kbd, 0x10, 3, 5, 2);  // Ctrl+P

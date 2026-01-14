@@ -333,6 +333,7 @@ int __not_in_flash_func(oric_main)() {
     }
 
     static bool shift_pressed = false;
+    static bool ctrl_pressed = false;
     uint16_t addr_value = 0;
     if (emul_addrlog_pop(&addr_value)) {
       if ((addr_value & 0xFFF) == CMD_KEYPRESS ||
@@ -342,12 +343,27 @@ int __not_in_flash_func(oric_main)() {
           bool is_press = ((addr_value & 0xFFF) == CMD_KEYPRESS);
           uint16_t scan_code = key_value & 0x7F;
           if (kbdmap_isShift(scan_code)) {
+            if (is_press) {
+              kbd_raw_key_down(ORIC_KEY_SHIFT);
+            } else {
+              kbd_raw_key_up(ORIC_KEY_SHIFT);
+            }
             shift_pressed = is_press;
+            continue;
+          }
+          if (kbdmap_isCtrl(scan_code)) {
+            if (is_press) {
+              kbd_raw_key_down(ORIC_KEY_CTRL);
+            } else {
+              kbd_raw_key_up(ORIC_KEY_CTRL);
+            }
+            ctrl_pressed = is_press;
             continue;
           }
           DPRINTF("scan_code: $%02x, %s, shift: %c\n", scan_code,
                   is_press ? "DOWN" : "UP", shift_pressed ? 'Y' : 'N');
-          uint16_t ascii_value = kbdmap_StGsx2Ascii(scan_code, shift_pressed);
+          uint16_t ascii_value =
+              kbdmap_StGsx2Ascii(scan_code, shift_pressed, ctrl_pressed);
           if (is_press) {
             kbd_raw_key_down(ascii_value);
           } else {
