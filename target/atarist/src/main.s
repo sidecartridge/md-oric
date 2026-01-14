@@ -272,22 +272,16 @@ start_rom_code:
 	move.l (ROM4_ADDR + COPIED_CODE_SIZE - 4), d0
 	cmp.l 2(a6), d0
  	beq.s .loop_low_st ; If no need to refresh, wait for next VBL
-	move.l d0, 2(a6)	; Update the last refreshed framebuffer value
-	tst.l d0 		; Check which framebuffer is active
-	bne.s .fb_b
-.fb_a:
-	move.b  #(SCREEN_B_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
-	move.b  #((SCREEN_B_BASE_ADDR >> 8) & 8), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
-	lea (SCREEN_A_BASE_ADDR + CENTERED_XPOS), a1
-	bra.s .continue
-.fb_b:
-	move.b  #(SCREEN_A_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
-	move.b  #((SCREEN_A_BASE_ADDR >> 8) & 8), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
-	lea (SCREEN_B_BASE_ADDR + CENTERED_XPOS), a1
-.continue:
+
 	lea FRAMEBUFFER_A_ADDR, a0
 	move.w #ORIC_LINES-1, d7		; Number of lines to copy
-.copy_planes:
+
+	move.l d0, 2(a6)	; Update the last refreshed framebuffer value
+	tst.l d0 		; Check which framebuffer is active
+	bne .fb_b
+.fb_a:
+	lea (SCREEN_A_BASE_ADDR + CENTERED_XPOS), a1
+.copy_planes_a:
 	move.l (a0)+, (a1)
 	move.w (a0)+, 4(a1)
 	move.l (a0)+, 8(a1)
@@ -320,7 +314,50 @@ start_rom_code:
 	move.w (a0)+, 116(a1)
 
 	add.l d6, a1	; Next line
-	dbf d7, .copy_planes
+	dbf d7, .copy_planes_a
+	move.b  #(SCREEN_A_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
+	move.b  #((SCREEN_A_BASE_ADDR >> 8) & 8), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
+
+.fb_b:
+	lea (SCREEN_B_BASE_ADDR + CENTERED_XPOS), a1
+.copy_planes_b:
+	move.l (a0)+, (a1)
+	move.w (a0)+, 4(a1)
+	move.l (a0)+, 8(a1)
+	move.w (a0)+, 12(a1)
+	move.l (a0)+, 16(a1)
+	move.w (a0)+, 20(a1)
+	move.l (a0)+, 24(a1)
+	move.w (a0)+, 28(a1)
+	move.l (a0)+, 32(a1)
+	move.w (a0)+, 36(a1)
+	move.l (a0)+, 40(a1)
+	move.w (a0)+, 44(a1)
+	move.l (a0)+, 48(a1)
+	move.w (a0)+, 52(a1)
+	move.l (a0)+, 56(a1)
+	move.w (a0)+, 60(a1)
+	move.l (a0)+, 64(a1)
+	move.w (a0)+, 68(a1)
+	move.l (a0)+, 72(a1)
+	move.w (a0)+, 76(a1)
+	move.l (a0)+, 80(a1)
+	move.w (a0)+, 84(a1)
+	move.l (a0)+, 88(a1)
+	move.w (a0)+, 92(a1)
+	move.l (a0)+, 96(a1)
+	move.w (a0)+, 100(a1)
+	move.l (a0)+, 104(a1)
+	move.w (a0)+, 108(a1)
+	move.l (a0)+, 112(a1)
+	move.w (a0)+, 116(a1)
+
+	add.l d6, a1	; Next line
+	dbf d7, .copy_planes_b
+
+	move.b  #(SCREEN_B_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
+	move.b  #((SCREEN_B_BASE_ADDR >> 8) & 8), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
 
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 
