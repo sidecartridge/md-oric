@@ -5,6 +5,7 @@
 ### Fixed
 - Handle missing CTRL/SHIFT key presses in Oric input.
 - Clear memory on init to avoid stale state.
+- Fix Atari ST framebuffer switching logic.
 
 ### Changes
 - Docs: fix author attribution.
