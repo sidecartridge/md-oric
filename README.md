@@ -1,9 +1,24 @@
-# SidecarTridge Multi-device Oric Emulator
+<div align="center">
 
-This microfirmware app for the **SidecarTridge Multi-device platform** emulates an
-**Oric** computer in the Atari ST class of machines. The project follows the
-standard SidecarTridge split between RP2040 firmware (`rp/`) and target-computer
-firmware (`target/atarist/`).
+<img src="icon.png" alt="SidecarTridge Multi-device Oric Emulator" width="180" />
+
+# Oric Emulator
+
+[![Build](https://github.com/sidecartridge/md-oric/actions/workflows/build.yml/badge.svg)](https://github.com/sidecartridge/md-oric/actions/workflows/build.yml)
+[![Release](https://github.com/sidecartridge/md-oric/actions/workflows/release.yml/badge.svg)](https://github.com/sidecartridge/md-oric/actions/workflows/release.yml)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+
+</div>
+
+A [SidecarTridge Multi-device](https://sidecartridge.com) microfirmware that
+emulates an **Oric 1** and **Oric Atmos** computer on the Atari ST, STE, MegaST,
+and MegaSTE. The project follows the standard SidecarTridge split between RP2040
+firmware (`rp/`) and target-computer firmware (`target/atarist/`).
+
+> Learn how to install and use it:
+> <https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/oric-emulator/>
+
+> 🛒 **Get the hardware:** [SidecarTridge Multi-device](https://sidecartridge.com/products/sidecartridge-multidevice-atari-st/)
 
 This emulator is based on the [Reload Emulator](https://github.com/vsladkov/reload-emulator)
 project by Veselin Sladkov. **Huge thanks** for his great work!
