@@ -54,6 +54,7 @@
 #include "hardware/irq.h"
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/structs/ssi.h"
+#include "hardware/sync.h"
 #include "hardware/vreg.h"
 #include "kbdmap.h"
 #include "oric.h"
@@ -95,6 +96,9 @@ static void oric_set_loading_msg(uint8_t fkey) {
   }
   (void)snprintf(oric_msg_buf, sizeof(oric_msg_buf), "Loading F%u file...",
                  (unsigned)fkey);
+  // Message buffer (payload) then deadline (flag): Core 1 keys off the flag,
+  // so the text must be complete and visible before the flag is raised.
+  __dmb();
   oric_msg_until_us = time_us_32() + (ORIC_MSG_DISPLAY_SECONDS * 1000u * 1000u);
 }
 
@@ -255,6 +259,12 @@ void __not_in_flash_func(core1_main()) {
     if ((int32_t)(now_us - next_update_us) >= 0) {
       uint32_t until_us = oric_msg_until_us;
       if (until_us != 0 && (int32_t)(until_us - now_us) > 0) {
+        // oric_msg_buf is written by Core 0 and is not volatile, so without a
+        // barrier here the compiler may keep oric_msg_buf[0] in a register
+        // across iterations: it then sees the empty buffer from boot forever,
+        // the inlined `*msg == '\0'` check skips oric_show_msg, and nothing
+        // renders for the whole message window (display freezes, no overlay).
+        __dmb();
         oric_show_msg(&state.oric, oric_msg_buf);
       } else {
         if (until_us != 0) {
