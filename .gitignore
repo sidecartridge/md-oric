@@ -58,3 +58,10 @@ upload_s3.sh
 build/
 dist/
 .cache/
+
+# docs/ is a local working folder (iteration/epic/story backlog) — not committed,
+# same as the other SidecarTridge microfirmware repos.
+/docs/
+
+Testing roms
+/roms/
