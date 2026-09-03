@@ -248,7 +248,9 @@ void oric_init(oric_t* sys, const oric_desc_t* desc) {
 
   memset(sys, 0, sizeof(oric_t));
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
-  sys->fb = (uint16_t*)(fb_base + ATARI_ST_FRAMEBUFFERS_OFFSET);
+  // Increment 3: every frame renders into B and the m68k blits only from B.
+  // No alternation yet -- this isolates the render-into-B path on its own.
+  sys->fb = (uint16_t*)(fb_base + ATARI_ST_FRAMEBUFFER_B_OFFSET);
   sys->valid = true;
   sys->debug = desc->debug;
   sys->audio_callback = desc->audio.callback;
@@ -635,16 +637,6 @@ static uint8_t oric_no_rom_glyph_row(char c, int row) {
   }
 }
 
-// Increment 2 scaffolding: mirror the finished frame into framebuffer B while
-// the m68k still reads only A. Isolates whether per-frame writes to the upper
-// window disturb anything. Replaced by real B rendering in increment 3.
-static inline void _oric_shadow_to_b(void) {
-  uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
-  memcpy(fb_base + ATARI_ST_FRAMEBUFFER_B_OFFSET,
-         fb_base + ATARI_ST_FRAMEBUFFER_A_OFFSET,
-         ATARI_ST_FRAMEBUFFER_SIZE_BYTES);
-}
-
 void oric_show_msg(oric_t* sys, const char* msg) {
   CHIPS_ASSERT(sys && sys->valid);
   if (!msg || *msg == '\0') {
@@ -722,7 +714,6 @@ void oric_show_msg(oric_t* sys, const char* msg) {
     }
   }
 
-  _oric_shadow_to_b();
   sys->fb_frame_counter++;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
   uint16_t* fb_counter = (uint16_t*)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
@@ -839,7 +830,6 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
   }
   sys->pattr = pattr;
 
-  _oric_shadow_to_b();
   sys->fb_frame_counter++;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
   uint16_t* fb_counter = (uint16_t*)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);

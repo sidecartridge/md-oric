@@ -26,6 +26,7 @@
 ROM4_ADDR			equ $FA0000
 CENTERED_XPOS		equ 16 ; Centered X position for Oric low res. 16 bytes (32 pixels) margin on left side
 FRAMEBUFFER_A_ADDR	equ (ROM4_ADDR + $1000)
+FRAMEBUFFER_B_ADDR	equ (ROM4_ADDR + $8000) ; Upper half of the window, freed from the Oric ROM
 AYBUFFER_ADDR		equ (FRAMEBUFFER_A_ADDR + (ORIC_LINES*ORIC_WORDS_PER_LINE*2*3)) ; AY sound buffer after the framebuffer
 AYBUFFER_SIZE		equ 512 ; Size of the AY sound buffer in bytes
 COPIED_CODE_OFFSET	equ $00010000 ; The offset should be below the screen memory
@@ -278,7 +279,7 @@ start_rom_code:
 	cmp.w 2(a6), d0
  	beq.s .loop_low_st ; Counter unchanged: no new frame, wait for next VBL
 
-	lea FRAMEBUFFER_A_ADDR, a0
+	lea FRAMEBUFFER_B_ADDR, a0	; Increment 3: blit only from B, no alternation
 	move.w #ORIC_LINES-1, d7		; Number of lines to copy
 
 	move.w d0, 2(a6)	; Remember the counter we are about to blit
