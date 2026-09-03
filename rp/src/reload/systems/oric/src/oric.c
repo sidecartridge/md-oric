@@ -114,7 +114,7 @@ static inline void flash_set_baud_div(uint16_t div) {
   ssi_hw->baudr = div;
 }
 
-uint8_t __attribute__((section(".oric_rom_in_ram")))
+uint8_t __attribute__((section(".oric_ram")))
 __attribute__((aligned(4))) oric_rom[ORIC_ROM_SIZE] = {0};
 
 // Get oric_desc_t struct based on joystick type
