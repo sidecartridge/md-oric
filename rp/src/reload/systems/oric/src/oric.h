@@ -119,6 +119,11 @@ extern uint8_t oric_rom[ORIC_ROM_SIZE];
 // 16-bit value crosses the bus intact (the PIO's DMA does a halfword load).
 // Bytes 0x0FFE-0x0FFF are unused padding up to the framebuffer at 0x1000.
 #define ATARI_ST_FRAME_COUNTER_OFFSET 0x0FFCu
+// The two framebuffers. B sits in the upper half of the 64 KB window, freed by
+// moving oric_rom into ORIC_RAM. The window is linear: the PIO builds the read
+// address as 0x20030000 | addr16, so $8000+ is backed by ORIC_ROM_IN_RAM.
+#define ATARI_ST_FRAMEBUFFER_A_OFFSET ATARI_ST_FRAMEBUFFERS_OFFSET
+#define ATARI_ST_FRAMEBUFFER_B_OFFSET 0x8000u
 #define ATARI_ST_VIA_QUEUE_SIZE_BYTES 512u
 #define ATARI_ST_VIA_QUEUE_OFFSET \
   (ATARI_ST_FRAMEBUFFERS_OFFSET + ATARI_ST_FRAMEBUFFER_SIZE_BYTES)
@@ -630,6 +635,16 @@ static uint8_t oric_no_rom_glyph_row(char c, int row) {
   }
 }
 
+// Increment 2 scaffolding: mirror the finished frame into framebuffer B while
+// the m68k still reads only A. Isolates whether per-frame writes to the upper
+// window disturb anything. Replaced by real B rendering in increment 3.
+static inline void _oric_shadow_to_b(void) {
+  uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
+  memcpy(fb_base + ATARI_ST_FRAMEBUFFER_B_OFFSET,
+         fb_base + ATARI_ST_FRAMEBUFFER_A_OFFSET,
+         ATARI_ST_FRAMEBUFFER_SIZE_BYTES);
+}
+
 void oric_show_msg(oric_t* sys, const char* msg) {
   CHIPS_ASSERT(sys && sys->valid);
   if (!msg || *msg == '\0') {
@@ -707,6 +722,7 @@ void oric_show_msg(oric_t* sys, const char* msg) {
     }
   }
 
+  _oric_shadow_to_b();
   sys->fb_frame_counter++;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
   uint16_t* fb_counter = (uint16_t*)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
@@ -823,6 +839,7 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
   }
   sys->pattr = pattr;
 
+  _oric_shadow_to_b();
   sys->fb_frame_counter++;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
   uint16_t* fb_counter = (uint16_t*)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
