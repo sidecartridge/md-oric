@@ -52,6 +52,11 @@ REMOTE_RESET		      equ $1					      ; The device ask to reset the
 
 AYBUFF_POS		          equ $8                          ; Offset of the AY sound buffer position
 
+; Frame counter published by the RP once per completed frame. A word, free to
+; wrap: we only ever test it for inequality against our own saved copy. Sits in
+; the last longword of the copied code block, just below the framebuffer.
+FRAMECOUNT_ADDR	          equ (ROM4_ADDR + COPIED_CODE_SIZE - 4)
+
 _dskbufp                  equ $4c6                        ; Address of the disk buffer pointer    
 
 ; Video base address
@@ -233,7 +238,7 @@ start_rom_code:
 
 	lea (SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.vblank_flag - ROM4_ADDR)), a6
 	clr.w (a6)			; Clear VBL flag
-	clr.l 2(a6)			; Clear last refreshed framebuffer value
+	clr.l 2(a6)			; Clear last frame counter (a6+2) and page flag (a6+4)
 	clr.w 6(a6)			; Clear overscan flag
 	clr.w AYBUFF_POS(a6); Clear AY sound buffer position
 
@@ -269,15 +274,18 @@ start_rom_code:
 	bra.s .continue_ay_sound
 
 .no_ay_sound:
-	move.l (ROM4_ADDR + COPIED_CODE_SIZE - 4), d0
-	cmp.l 2(a6), d0
- 	beq.s .loop_low_st ; If no need to refresh, wait for next VBL
+	move.w FRAMECOUNT_ADDR, d0	; Frame counter published by the RP
+	cmp.w 2(a6), d0
+ 	beq.s .loop_low_st ; Counter unchanged: no new frame, wait for next VBL
 
 	lea FRAMEBUFFER_A_ADDR, a0
 	move.w #ORIC_LINES-1, d7		; Number of lines to copy
 
-	move.l d0, 2(a6)	; Update the last refreshed framebuffer value
-	tst.l d0 		; Check which framebuffer is active
+	move.w d0, 2(a6)	; Remember the counter we are about to blit
+	; The destination page is ours to choose: alternate every blit so we never
+	; write the page currently being displayed. Deriving it from the RP value
+	; used to drop a frame whenever the RP produced two frames in one ST frame.
+	tst.w 4(a6)
 	bne .fb_b
 .fb_a:
 	lea (SCREEN_A_BASE_ADDR + CENTERED_XPOS), a1
@@ -315,8 +323,9 @@ start_rom_code:
 
 	add.l d6, a1	; Next line
 	dbf d7, .copy_planes_a
+	move.w #1, 4(a6)	; Next blit targets page B
 	move.b  #(SCREEN_A_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
-	move.b  #((SCREEN_A_BASE_ADDR >> 8) & 8), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	move.b  #((SCREEN_A_BASE_ADDR >> 8) & $ff), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 
 .fb_b:
@@ -356,8 +365,9 @@ start_rom_code:
 	add.l d6, a1	; Next line
 	dbf d7, .copy_planes_b
 
+	clr.w 4(a6)			; Next blit targets page A
 	move.b  #(SCREEN_B_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
-	move.b  #((SCREEN_B_BASE_ADDR >> 8) & 8), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	move.b  #((SCREEN_B_BASE_ADDR >> 8) & $ff), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
 
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 
@@ -426,11 +436,15 @@ start_rom_code:
 	move.w #LOW_BORDER_OVERSCAN_START, (SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.overscan_flag - ROM4_ADDR))
 	rte
 .vblank_flag:
-	dc.w 0
-.refresh_fb_flag:
-	dc.l 0
+	dc.w 0						; a6+0
+.last_framecount:
+	dc.w 0						; a6+2  last RP frame counter we blitted
+.page_flag:
+	dc.w 0						; a6+4  0 = next blit targets page A, else page B
 .overscan_flag:
-	dc.w 0
+	dc.w 0						; a6+6
+.aybuff_pos:					; AYBUFF_POS equ $8 -> a6+8. Must stay immediately
+	dc.w 0						; after .overscan_flag to keep that offset.
 
 
 .reset:

@@ -286,6 +286,10 @@ int __not_in_flash_func(oric_main)() {
   oric_via_queue_head = 0;
   memset(oric_via_queue, 0xFF, ATARI_ST_VIA_QUEUE_SIZE_BYTES);
 
+  // The firmware copy does not reach 0x0FFC, so the counter would otherwise
+  // start as uninitialised SRAM. Both sides start at 0 and agree.
+  *(uint16_t *)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET) = 0;
+
   uint32_t khz_speed = 260000;
 
   flash_set_baud_div(khz_speed / 66000);  // Flash at Freq /66MHz
@@ -313,10 +317,11 @@ int __not_in_flash_func(oric_main)() {
     DPRINTF("rom.img load error: %d\n", rom_load_result);
     oric_show_msg(&state.oric, "NO ROM FOUND");
     while (1) {
-      state.oric.fb_toggle ^= 1u;
+      state.oric.fb_frame_counter++;
       uint8_t *fb_base = (uint8_t *)&__rom_in_ram_start__;
-      uint32_t *fb_toggle_fb = (uint32_t *)(fb_base + 0x0FFC);
-      *fb_toggle_fb = state.oric.fb_toggle ? 0xFFFFFFFF : 0x0;
+      uint16_t *fb_counter =
+          (uint16_t *)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
+      *fb_counter = state.oric.fb_frame_counter;
       sleep_ms(1000);
     }
   }

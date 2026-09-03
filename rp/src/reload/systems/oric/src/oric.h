@@ -111,6 +111,14 @@ extern uint8_t oric_rom[ORIC_ROM_SIZE];
   (ORIC_SCREEN_HEIGHT * ATARI_ST_FRAMEBUFFER_LINE_SIZE_BYTES)
 #define ATARI_ST_FRAMEBUFFER_SIZE_16WORDS (ATARI_ST_FRAMEBUFFER_SIZE_BYTES / 2)
 #define ATARI_ST_FRAMEBUFFERS_OFFSET 0x1000
+// Frame counter the m68k polls once per VBL to decide whether to re-blit.
+// A uint16_t, incremented on every completed frame and free to wrap: the m68k
+// only ever tests it for inequality against its own saved copy.
+// 16 bits deliberately -- an m68k `move.l` is two word reads, so a 32-bit value
+// written natively by the RP would reach the ST with its halfwords swapped. A
+// 16-bit value crosses the bus intact (the PIO's DMA does a halfword load).
+// Bytes 0x0FFE-0x0FFF are unused padding up to the framebuffer at 0x1000.
+#define ATARI_ST_FRAME_COUNTER_OFFSET 0x0FFCu
 #define ATARI_ST_VIA_QUEUE_SIZE_BYTES 512u
 #define ATARI_ST_VIA_QUEUE_OFFSET \
   (ATARI_ST_FRAMEBUFFERS_OFFSET + ATARI_ST_FRAMEBUFFER_SIZE_BYTES)
@@ -151,7 +159,7 @@ typedef struct {
 
   // Framebuffer for the Atari ST emulation in the ROM in RAM area
   uint16_t* fb;
-  uint16_t fb_toggle;
+  uint16_t fb_frame_counter;
   // SAFEGUARD END
 
   volatile bool screen_dirty;
@@ -699,10 +707,10 @@ void oric_show_msg(oric_t* sys, const char* msg) {
     }
   }
 
-  sys->fb_toggle ^= 1u;
+  sys->fb_frame_counter++;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
-  uint32_t* fb_toggle_fb = (uint32_t*)(fb_base + 0x0FFC);
-  *fb_toggle_fb = sys->fb_toggle ? 0xFFFFFFFF : 0x0;
+  uint16_t* fb_counter = (uint16_t*)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
+  *fb_counter = sys->fb_frame_counter;
   sys->screen_dirty = false;
 }
 
@@ -815,10 +823,10 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
   }
   sys->pattr = pattr;
 
-  sys->fb_toggle ^= 1u;
+  sys->fb_frame_counter++;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
-  uint32_t* fb_toggle_fb = (uint32_t*)(fb_base + 0x0FFC);
-  *fb_toggle_fb = sys->fb_toggle ? 0xFFFFFFFF : 0x0;
+  uint16_t* fb_counter = (uint16_t*)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
+  *fb_counter = sys->fb_frame_counter;
 
   sys->screen_dirty = false;
   return 1;
