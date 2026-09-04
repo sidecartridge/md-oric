@@ -181,8 +181,10 @@ typedef struct {
 
 // SAFEGUARD START: LUT for Oric pattern bits
 static uint8_t oric_pat_lut[64][6] __attribute__((section(".oric_ram")));
-static uint16_t line_buff[120]
-    __attribute__((section(".oric_ram")));  // 240 pixels
+// One palette index per pixel: the chunked layout md-framebuffer-template's
+// transpose expects. 4-byte aligned so the packer can read it as uint32.
+static uint8_t line_buff[240] __attribute__((section(".oric_ram")))
+__attribute__((aligned(4)));
 
 // SAFEGUARD END
 
@@ -232,7 +234,7 @@ static uint8_t _oric_psg_in(int port_id, void* user_data);
 static void _oric_init_memorymap(oric_t* sys);
 static void _oric_init_key_map(oric_t* sys);
 static void build_oric_pat_lut(void);
-static uint8_t oric_no_rom_glyph_row(char c, int row);
+static uint8_t oric_glyph_row(char c, int row);
 
 #define PATTR_50HZ (0x02)
 #define PATTR_HIRES (0x04)
@@ -511,130 +513,18 @@ static void build_oric_pat_lut(void) {
   }
 }
 
-static uint8_t oric_no_rom_glyph_row(char c, int row) {
-  if (c >= 'a' && c <= 'z') {
-    c = (char)(c - 'a' + 'A');
+// Glyph lookup into the shared 8x8 ASCII strike (font8x8.h, ported from
+// md-framebuffer-template). Returns the row's bits with **bit 0 = leftmost
+// pixel**, which is that asset's contract; unsupported codepoints render blank.
+static uint8_t oric_glyph_row(char c, int row) {
+  const struct FB_FONT* f = &font8x8;
+  unsigned char ch = (unsigned char)c;
+  if (ch < (unsigned)f->first_char ||
+      ch >= (unsigned)(f->first_char + f->num_chars) || row < 0 ||
+      row >= f->h) {
+    return 0x00;
   }
-  switch (c) {
-    case 'A': {
-      static const uint8_t glyph[8] = {0x1E, 0x33, 0x33, 0x3F,
-                                       0x33, 0x33, 0x33, 0x00};
-      return glyph[row & 7];
-    }
-    case 'E': {
-      static const uint8_t glyph[8] = {0x3F, 0x30, 0x30, 0x3E,
-                                       0x30, 0x30, 0x3F, 0x00};
-      return glyph[row & 7];
-    }
-    case 'G': {
-      static const uint8_t glyph[8] = {0x1E, 0x33, 0x30, 0x37,
-                                       0x33, 0x33, 0x1E, 0x00};
-      return glyph[row & 7];
-    }
-    case 'I': {
-      static const uint8_t glyph[8] = {0x3F, 0x0C, 0x0C, 0x0C,
-                                       0x0C, 0x0C, 0x3F, 0x00};
-      return glyph[row & 7];
-    }
-    case 'L': {
-      static const uint8_t glyph[8] = {0x30, 0x30, 0x30, 0x30,
-                                       0x30, 0x30, 0x3F, 0x00};
-      return glyph[row & 7];
-    }
-    case 'N': {
-      static const uint8_t glyph[8] = {0x33, 0x3B, 0x37, 0x37,
-                                       0x33, 0x33, 0x33, 0x00};
-      return glyph[row & 7];
-    }
-    case 'O': {
-      static const uint8_t glyph[8] = {0x1E, 0x33, 0x33, 0x33,
-                                       0x33, 0x33, 0x1E, 0x00};
-      return glyph[row & 7];
-    }
-    case 'R': {
-      static const uint8_t glyph[8] = {0x3C, 0x33, 0x33, 0x3C,
-                                       0x36, 0x33, 0x33, 0x00};
-      return glyph[row & 7];
-    }
-    case 'M': {
-      static const uint8_t glyph[8] = {0x33, 0x3F, 0x37, 0x33,
-                                       0x33, 0x33, 0x33, 0x00};
-      return glyph[row & 7];
-    }
-    case 'F': {
-      static const uint8_t glyph[8] = {0x3F, 0x30, 0x30, 0x3E,
-                                       0x30, 0x30, 0x30, 0x00};
-      return glyph[row & 7];
-    }
-    case 'U': {
-      static const uint8_t glyph[8] = {0x33, 0x33, 0x33, 0x33,
-                                       0x33, 0x33, 0x1E, 0x00};
-      return glyph[row & 7];
-    }
-    case 'D': {
-      static const uint8_t glyph[8] = {0x3C, 0x33, 0x33, 0x33,
-                                       0x33, 0x33, 0x3C, 0x00};
-      return glyph[row & 7];
-    }
-    case '0': {
-      static const uint8_t glyph[8] = {0x1E, 0x33, 0x33, 0x33,
-                                       0x33, 0x33, 0x1E, 0x00};
-      return glyph[row & 7];
-    }
-    case '1': {
-      static const uint8_t glyph[8] = {0x0C, 0x1C, 0x0C, 0x0C,
-                                       0x0C, 0x0C, 0x3F, 0x00};
-      return glyph[row & 7];
-    }
-    case '2': {
-      static const uint8_t glyph[8] = {0x1E, 0x33, 0x03, 0x06,
-                                       0x0C, 0x18, 0x3F, 0x00};
-      return glyph[row & 7];
-    }
-    case '3': {
-      static const uint8_t glyph[8] = {0x1E, 0x33, 0x03, 0x0E,
-                                       0x03, 0x33, 0x1E, 0x00};
-      return glyph[row & 7];
-    }
-    case '4': {
-      static const uint8_t glyph[8] = {0x06, 0x0E, 0x1E, 0x36,
-                                       0x3F, 0x06, 0x06, 0x00};
-      return glyph[row & 7];
-    }
-    case '5': {
-      static const uint8_t glyph[8] = {0x3F, 0x30, 0x3E, 0x03,
-                                       0x03, 0x33, 0x1E, 0x00};
-      return glyph[row & 7];
-    }
-    case '6': {
-      static const uint8_t glyph[8] = {0x0E, 0x18, 0x30, 0x3E,
-                                       0x33, 0x33, 0x1E, 0x00};
-      return glyph[row & 7];
-    }
-    case '7': {
-      static const uint8_t glyph[8] = {0x3F, 0x03, 0x06, 0x0C,
-                                       0x18, 0x18, 0x18, 0x00};
-      return glyph[row & 7];
-    }
-    case '8': {
-      static const uint8_t glyph[8] = {0x1E, 0x33, 0x33, 0x1E,
-                                       0x33, 0x33, 0x1E, 0x00};
-      return glyph[row & 7];
-    }
-    case '9': {
-      static const uint8_t glyph[8] = {0x1E, 0x33, 0x33, 0x1F,
-                                       0x03, 0x06, 0x1C, 0x00};
-      return glyph[row & 7];
-    }
-    case '.': {
-      static const uint8_t glyph[8] = {0x00, 0x00, 0x00, 0x00,
-                                       0x00, 0x0C, 0x0C, 0x00};
-      return glyph[row & 7];
-    }
-    case ' ':
-    default:
-      return 0x00;
-  }
+  return f->data[(ch - f->first_char) * f->h + row];
 }
 
 // A frame is rendered into the buffer named by bit 0 of the counter value it
@@ -644,6 +534,43 @@ static inline uint16_t* _oric_fb_for_count(uint16_t count) {
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
   return (uint16_t*)(fb_base + ((count & 1u) ? ATARI_ST_FRAMEBUFFER_B_OFFSET
                                              : ATARI_ST_FRAMEBUFFER_A_OFFSET));
+}
+
+// Pack 240 palette-index bytes into 15 ST planar word-triples.
+//
+// Multiply-comb transpose, ported from md-framebuffer-template's
+// `fb_c2p_half` (rp/src/fb_chunked_asm.S). Per 4 pixels held in one uint32:
+//
+//     nibble_K = (((q >> K) & 0x01010101) * 0x80402010) >> 28
+//
+// The AND isolates bit K of each byte; the multiply scatters those four bits
+// into the product's top nibble, leftmost pixel in the MSB -- which is the ST
+// shifter's convention. Three planes here rather than the template's four.
+//
+// Replaces six conditional bit-sets per two pixels: on a Cortex-M0+ with no
+// conditional execution those were ~161k real branches per frame.
+// Proven bit-identical to the loop it replaces over every single-pixel case
+// and 200k random lines.
+static inline void __not_in_flash_func(_oric_pack_line)(
+    uint16_t* restrict dst, const uint8_t* restrict src) {
+  for (int word = 0; word < 15; word++) {
+    uint32_t p0 = 0;
+    uint32_t p1 = 0;
+    uint32_t p2 = 0;
+    for (int g = 0; g < 4; g++) {
+      uint32_t q;
+      __builtin_memcpy(&q, src, sizeof(q));
+      src += 4;
+      const int sh = 12 - 4 * g;
+      p0 |= ((((q >> 0) & 0x01010101u) * 0x80402010u) >> 28) << sh;
+      p1 |= ((((q >> 1) & 0x01010101u) * 0x80402010u) >> 28) << sh;
+      p2 |= ((((q >> 2) & 0x01010101u) * 0x80402010u) >> 28) << sh;
+    }
+    dst[0] = (uint16_t)p0;
+    dst[1] = (uint16_t)p1;
+    dst[2] = (uint16_t)p2;
+    dst += ATARI_ST_BITCOLORS_PER_PIXEL;
+  }
 }
 
 void oric_show_msg(oric_t* sys, const char* msg) {
@@ -656,8 +583,8 @@ void oric_show_msg(oric_t* sys, const char* msg) {
   sys->fb = fb;
   memset(fb, 0, ATARI_ST_FRAMEBUFFER_SIZE_16WORDS * sizeof(uint16_t));
 
-  const int glyph_w = 6;
-  const int glyph_h = 8;
+  const int glyph_w = font8x8.w;
+  const int glyph_h = font8x8.h;
   const uint8_t fg = 0x07;
   const int len = (int)strlen(msg);
   int start_x = (ORIC_SCREEN_WIDTH - (len * glyph_w)) / 2;
@@ -673,56 +600,23 @@ void oric_show_msg(oric_t* sys, const char* msg) {
     memset(line_buff, 0, sizeof(line_buff));
 
     for (int i = 0; i < len; i++) {
-      uint8_t row_bits = oric_no_rom_glyph_row(msg[i], y);
+      uint8_t row_bits = oric_glyph_row(msg[i], y);
       int base_x = start_x + (i * glyph_w);
       for (int bit = 0; bit < glyph_w; bit++) {
-        if (row_bits & (1u << (glyph_w - 1 - bit))) {
+        // font8x8 is LSB-left: bit 0 is the leftmost pixel of the row.
+        if (row_bits & (1u << bit)) {
           int x = base_x + bit;
           if (x < 0 || x >= ORIC_SCREEN_WIDTH) {
             continue;
           }
-          int idx = x >> 1;
-          uint16_t packed = line_buff[idx];
-          if ((x & 1) == 0) {
-            packed = (uint16_t)((packed & 0xFFF0u) | fg);
-          } else {
-            packed = (uint16_t)((packed & 0xF0FFu) | ((uint16_t)fg << 8));
-          }
-          line_buff[idx] = packed;
+          line_buff[x] = fg;
         }
       }
     }
 
     uint16_t* restrict dst_line =
         fb + (screen_y * ATARI_ST_FRAMEBUFFER_LINE_SIZE_16WORDS);
-    for (int word = 0; word < 15; word++) {
-      uint16_t p0 = 0;
-      uint16_t p1 = 0;
-      uint16_t p2 = 0;
-      uint16_t bit = 0x8000;
-      uint16_t* p = dst_line + (word * ATARI_ST_BITCOLORS_PER_PIXEL);
-      int base_word = word * 8;
-
-      for (int i = 0; i < 8; i++) {
-        uint16_t packed = line_buff[base_word + i];
-        uint8_t c0 = packed & 0x0F;
-        uint8_t c1 = (packed >> 8) & 0x0F;
-
-        if (c0 & 0x01) p0 |= bit;
-        if (c0 & 0x02) p1 |= bit;
-        if (c0 & 0x04) p2 |= bit;
-        bit >>= 1;
-
-        if (c1 & 0x01) p0 |= bit;
-        if (c1 & 0x02) p1 |= bit;
-        if (c1 & 0x04) p2 |= bit;
-        bit >>= 1;
-      }
-
-      p[0] = p0;
-      p[1] = p1;
-      p[2] = p2;
-    }
+    _oric_pack_line(dst_line, line_buff);
   }
 
   sys->fb_frame_counter = next_count;
@@ -803,43 +697,16 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
       }
 
       const uint8_t* bits = oric_pat_lut[pat & 0x3F];
-      uint16_t* dst16 = &line_buff[x * 3];
-      dst16[0] =
-          (uint16_t)((bits[0] ? c_fg : c_bg) | ((bits[1] ? c_fg : c_bg) << 8));
-      dst16[1] =
-          (uint16_t)((bits[2] ? c_fg : c_bg) | ((bits[3] ? c_fg : c_bg) << 8));
-      dst16[2] =
-          (uint16_t)((bits[4] ? c_fg : c_bg) | ((bits[5] ? c_fg : c_bg) << 8));
+      uint8_t* restrict dst8 = &line_buff[x * 6];
+      dst8[0] = bits[0] ? c_fg : c_bg;
+      dst8[1] = bits[1] ? c_fg : c_bg;
+      dst8[2] = bits[2] ? c_fg : c_bg;
+      dst8[3] = bits[3] ? c_fg : c_bg;
+      dst8[4] = bits[4] ? c_fg : c_bg;
+      dst8[5] = bits[5] ? c_fg : c_bg;
     }
 
-    for (int word = 0; word < 15; word++) {
-      uint16_t p0 = 0;
-      uint16_t p1 = 0;
-      uint16_t p2 = 0;
-      uint16_t bit = 0x8000;
-      uint16_t* p = dst_line + (word * ATARI_ST_BITCOLORS_PER_PIXEL);
-      int base_word = word * 8;
-
-      for (int i = 0; i < 8; i++) {
-        uint16_t packed = line_buff[base_word + i];
-        uint8_t c0 = packed & 0x0F;
-        uint8_t c1 = (packed >> 8) & 0x0F;
-
-        if (c0 & 0x01) p0 |= bit;
-        if (c0 & 0x02) p1 |= bit;
-        if (c0 & 0x04) p2 |= bit;
-        bit >>= 1;
-
-        if (c1 & 0x01) p0 |= bit;
-        if (c1 & 0x02) p1 |= bit;
-        if (c1 & 0x04) p2 |= bit;
-        bit >>= 1;
-      }
-
-      p[0] = p0;
-      p[1] = p1;
-      p[2] = p2;
-    }
+    _oric_pack_line(dst_line, line_buff);
   }
   sys->pattr = pattr;
 

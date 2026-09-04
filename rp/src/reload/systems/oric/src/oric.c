@@ -56,6 +56,7 @@
 #include "hardware/structs/ssi.h"
 #include "hardware/sync.h"
 #include "hardware/vreg.h"
+#include "font8x8.h"
 #include "kbdmap.h"
 #include "oric.h"
 #include "pico/multicore.h"
@@ -86,6 +87,15 @@ uint16_t oric_via_queue_head;
 static volatile uint32_t oric_msg_until_us;
 static char oric_msg_buf[32];
 
+// EPIC-03 STORY-01: cost of oric_screen_update, sampled on Core 1 and read on
+// Core 0 when the stats key is pressed. Scalars, so volatile is enough to stop
+// the compiler caching them across the loop (D-13); the barrier before reading
+// keeps the four consistent with each other.
+static volatile uint32_t oric_cvt_min_us = 0xFFFFFFFFu;
+static volatile uint32_t oric_cvt_max_us = 0;
+static volatile uint32_t oric_cvt_sum_us = 0;
+static volatile uint32_t oric_cvt_count = 0;
+
 #ifndef ORIC_MSG_DISPLAY_SECONDS
 #define ORIC_MSG_DISPLAY_SECONDS 3u
 #endif
@@ -94,16 +104,42 @@ static char oric_msg_buf[32];
 // than a PAL frame so it never races the ST when the handshake is healthy.
 #define ORIC_FRAME_FALLBACK_US 25000u
 
+// Payload then flag, always: Core 1 keys off the deadline, so the text must be
+// complete and visible before the deadline is raised (D-13).
+static void oric_publish_msg(void) {
+  __dmb();
+  oric_msg_until_us = time_us_32() + (ORIC_MSG_DISPLAY_SECONDS * 1000u * 1000u);
+}
+
 static void oric_set_loading_msg(uint8_t fkey) {
   if (fkey < 1 || fkey > 10) {
     return;
   }
   (void)snprintf(oric_msg_buf, sizeof(oric_msg_buf), "Loading F%u file...",
                  (unsigned)fkey);
-  // Message buffer (payload) then deadline (flag): Core 1 keys off the flag,
-  // so the text must be complete and visible before the flag is raised.
+  oric_publish_msg();
+}
+
+// Show min / mean / max microseconds per conversion, then start a fresh
+// sample window so the next program measured is not polluted by this one.
+static void oric_show_cvt_stats(void) {
   __dmb();
-  oric_msg_until_us = time_us_32() + (ORIC_MSG_DISPLAY_SECONDS * 1000u * 1000u);
+  uint32_t count = oric_cvt_count;
+  uint32_t sum = oric_cvt_sum_us;
+  uint32_t lo = oric_cvt_min_us;
+  uint32_t hi = oric_cvt_max_us;
+  if (count == 0) {
+    (void)snprintf(oric_msg_buf, sizeof(oric_msg_buf), "NO DATA");
+  } else {
+    (void)snprintf(oric_msg_buf, sizeof(oric_msg_buf), "%lu/%lu/%lu us",
+                   (unsigned long)lo, (unsigned long)(sum / count),
+                   (unsigned long)hi);
+  }
+  oric_cvt_min_us = 0xFFFFFFFFu;
+  oric_cvt_max_us = 0;
+  oric_cvt_sum_us = 0;
+  oric_cvt_count = 0;
+  oric_publish_msg();
 }
 
 inline void oric_ayQueuePush(uint16_t *queue, uint16_t *head, uint16_t value) {
@@ -228,6 +264,10 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
       break;
     }
 
+    case 0x148:  // ST HOME: show conversion timing, then reset the window
+      oric_show_cvt_stats();
+      break;
+
     case 0x144:  // F11
       oric_nmi(sys);
       break;
@@ -287,7 +327,14 @@ void __not_in_flash_func(core1_main()) {
         if (until_us != 0) {
           oric_msg_until_us = 0;
         }
-        (void)oric_screen_update(&state.oric);
+        uint32_t cvt_t0 = time_us_32();
+        if (oric_screen_update(&state.oric)) {
+          uint32_t dt = time_us_32() - cvt_t0;
+          if (dt < oric_cvt_min_us) oric_cvt_min_us = dt;
+          if (dt > oric_cvt_max_us) oric_cvt_max_us = dt;
+          oric_cvt_sum_us += dt;
+          oric_cvt_count++;
+        }
       }
       next_update_us = now_us + ORIC_FRAME_FALLBACK_US;
     }
