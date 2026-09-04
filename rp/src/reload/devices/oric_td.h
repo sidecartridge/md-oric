@@ -49,7 +49,9 @@ void oric_td_reset(oric_td_t* sys);
 void oric_td_tick_sdcard(oric_td_t* sys);
 
 // Insert a new tape file from SD card
-bool oric_td_insert_tape_sdcard(oric_td_t* sys, int index);
+// SAFEGUARD: takes a filename, not an F-key index -- the menu chooses the
+// file now (EPIC-05). A .tap is converted to a .wav beside it on first use.
+bool oric_td_insert_tape_sdcard(oric_td_t* sys, const char* filename);
 
 // Convert TAP image into WAVE image stored on SD card
 bool oric_convert_tap_to_wave(const char* tap_path, const char* wave_path);
@@ -485,20 +487,38 @@ void oric_td_tick_sdcard(oric_td_t* sys) {
   }
 }
 
-bool oric_td_insert_tape_sdcard(oric_td_t* sys, int index) {
+bool oric_td_insert_tape_sdcard(oric_td_t* sys, const char* filename) {
   CHIPS_ASSERT(sys && sys->valid);
+  if (!filename || filename[0] == '\0') {
+    return false;
+  }
   oric_td_remove_tape_sdcard(sys);
   sys->bit_pos = 7;
 
   SettingsConfigEntry* folder =
       settings_find_entry(aconfig_getContext(), ACONFIG_PARAM_FOLDER);
   const char* folder_name = folder ? folder->value : "/oric";
+
+  // Derive both paths from the chosen name: the .wav is what actually gets
+  // played, and a .tap is converted into one beside it on first use.
+  char base[256];
+  size_t blen = strlen(filename);
+  if (blen >= sizeof(base)) {
+    DPRINTF("Oric TD: tape name too long\n");
+    return false;
+  }
+  memcpy(base, filename, blen + 1);
+  char* dot = strrchr(base, '.');
+  if (dot) {
+    *dot = '\0';
+  }
+
   char wav_path[256];
   char tap_path[256];
   int wav_len =
-      snprintf(wav_path, sizeof(wav_path), "%s/f%d.wav", folder_name, index + 1);
+      snprintf(wav_path, sizeof(wav_path), "%s/%s.wav", folder_name, base);
   int tap_len =
-      snprintf(tap_path, sizeof(tap_path), "%s/f%d.tap", folder_name, index + 1);
+      snprintf(tap_path, sizeof(tap_path), "%s/%s.tap", folder_name, base);
   if (wav_len <= 0 || (size_t)wav_len >= sizeof(wav_path) || tap_len <= 0 ||
       (size_t)tap_len >= sizeof(tap_path)) {
     DPRINTF("Oric TD: invalid tape path length\n");

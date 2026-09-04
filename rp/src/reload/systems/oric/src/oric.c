@@ -88,6 +88,15 @@ uint16_t oric_via_queue_head;
 static volatile uint32_t oric_msg_until_us;
 static char oric_msg_buf[32];
 
+// EPIC-03 STORY-01: cost of oric_screen_update, sampled on Core 1 and read on
+// Core 0 when the stats key is pressed. Scalars, so volatile is enough to stop
+// the compiler caching them across the loop (D-13); the barrier before reading
+// keeps the four consistent with each other.
+static volatile uint32_t oric_cvt_min_us = 0xFFFFFFFFu;
+static volatile uint32_t oric_cvt_max_us = 0;
+static volatile uint32_t oric_cvt_sum_us = 0;
+static volatile uint32_t oric_cvt_count = 0;
+
 // ---------------------------------------------------------------------------
 // On-screen menu. Dispatcher shape follows md-gpu-demo's demo_menu.c: one key
 // owned for entering/leaving, everything else forwarded to whatever is active.
@@ -98,7 +107,14 @@ static char oric_msg_buf[32];
 // renderer), so it follows D-13: writer fills the payload, __dmb(), then
 // raises the flag; reader tests the flag, __dmb(), then reads the payload.
 // ---------------------------------------------------------------------------
-enum { ORIC_UI_EMULATING = 0, ORIC_UI_MENU = 1, ORIC_UI_ROMLIST = 2 };
+enum {
+  ORIC_UI_EMULATING = 0,
+  ORIC_UI_MENU = 1,
+  ORIC_UI_ROMLIST = 2,
+  ORIC_UI_TAPELIST = 3,
+  ORIC_UI_STATUS = 4
+};
+
 
 // File list. FatFs is built with long filenames (FF_MAX_LFN 255), but storing
 // 255 bytes per entry would not fit the RAM budget, and the overlay is only 30
@@ -119,7 +135,12 @@ static char oric_files[ORIC_FILES_MAX][ORIC_NAME_MAX]
     __attribute__((section(".oric_ram")));
 static int oric_file_count;
 static int oric_files_skipped;
+
+// Name of the tape currently in the drive, for the menu and for eject.
+static char oric_tape_name[ORIC_NAME_MAX];
 static volatile uint16_t oric_list_sel;
+
+static void oric_publish_msg(void);
 
 static int load_oric_rom_from_sd(const char *romName);
 
@@ -187,9 +208,29 @@ static bool oric_name_has_ext(const char* name, const char* ext) {
 
 // Runs on Core 0 from the key handler, not from the per-frame path: it blocks
 // on the SD card, so it must not sit inside the emulation or render loops.
-static void oric_scan_files(const char* ext) {
-  oric_file_count = 0;
-  oric_files_skipped = 0;
+// True if two filenames share a base name (differ only in extension), so a
+// converted .wav does not appear beside the .tap it came from.
+static bool oric_same_base(const char* a, const char* b) {
+  const char* da = strrchr(a, '.');
+  const char* db = strrchr(b, '.');
+  size_t la = da ? (size_t)(da - a) : strlen(a);
+  size_t lb = db ? (size_t)(db - b) : strlen(b);
+  if (la != lb) {
+    return false;
+  }
+  for (size_t i = 0; i < la; i++) {
+    char ca = a[i];
+    char cb = b[i];
+    if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+    if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+    if (ca != cb) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void oric_scan_files_ext(const char* ext, bool dedupe) {
 
   DIR dir;
   FRESULT res = f_opendir(&dir, oric_folder_name());
@@ -222,13 +263,41 @@ static void oric_scan_files(const char* ext) {
       oric_files_skipped++;
       continue;
     }
+    if (dedupe) {
+      bool seen = false;
+      for (int i = 0; i < oric_file_count; i++) {
+        if (oric_same_base(oric_files[i], info.fname)) {
+          seen = true;
+          break;
+        }
+      }
+      if (seen) {
+        continue;  // a .tap already covers this entry
+      }
+    }
     (void)snprintf(oric_files[oric_file_count], ORIC_NAME_MAX, "%s",
                    info.fname);
     oric_file_count++;
   }
   f_closedir(&dir);
-  DPRINTF("oric: %d '%s' files, %d skipped\n", oric_file_count, ext,
+  DPRINTF("oric: %d files after '%s', %d skipped\n", oric_file_count, ext,
           oric_files_skipped);
+}
+
+static void oric_scan_files(const char* ext) {
+  oric_file_count = 0;
+  oric_files_skipped = 0;
+  oric_scan_files_ext(ext, false);
+}
+
+// Tapes are .tap or .wav. Scan .tap first, then add only those .wav files with
+// no matching .tap -- the tape drive converts a .tap into a .wav beside it on
+// first use, and listing both halves of the same title twice is just confusing.
+static void oric_scan_tapes(void) {
+  oric_file_count = 0;
+  oric_files_skipped = 0;
+  oric_scan_files_ext(".tap", false);
+  oric_scan_files_ext(".wav", true);
 }
 
 static void oric_menu_render(oric_t* sys) {
@@ -254,17 +323,31 @@ static void oric_menu_render(oric_t* sys) {
   char line[ORIC_OVL_COLS + 1];
   (void)snprintf(line, sizeof(line), "ROM: %s", romName);
   oric_ovl_text(2, 20, line, ORIC_ATTR_DIM);
+  (void)snprintf(line, sizeof(line), "TAPE: %s",
+                 oric_tape_name[0] ? oric_tape_name : "(none)");
+  oric_ovl_text(2, 21, line, ORIC_ATTR_DIM);
 
   oric_ovl_text(2, 24, "UP/DN  RET=SELECT", ORIC_ATTR_DIM);
   oric_ovl_text(2, 25, "F1=CLOSE", ORIC_ATTR_DIM);
   oric_ovl_present(sys);
 }
 
-static void oric_romlist_render(oric_t* sys) {
+static void oric_list_render(oric_t* sys) {
+  const bool roms = (oric_ui_state == ORIC_UI_ROMLIST);
   oric_ovl_clear(ORIC_ATTR_NORMAL);
-  oric_ovl_text(2, 2, "SELECT ROM", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 2, roms ? "SELECT ROM" : "SELECT TAPE", ORIC_ATTR_NORMAL);
 
   if (oric_file_count == 0) {
+    if (!roms) {
+      oric_ovl_text(1, 6, "No tape files found in", ORIC_ATTR_NORMAL);
+      oric_ovl_text(1, 7, oric_folder_name(), ORIC_ATTR_DIM);
+      oric_ovl_text(1, 9, "Copy .tap or .wav files", ORIC_ATTR_NORMAL);
+      oric_ovl_text(1, 10, "there, then reopen this", ORIC_ATTR_NORMAL);
+      oric_ovl_text(1, 11, "menu.", ORIC_ATTR_NORMAL);
+      oric_ovl_text(1, 25, "F1=BACK", ORIC_ATTR_DIM);
+      oric_ovl_present(sys);
+      return;
+    }
     // Reachable now that nothing is embedded (D-07 superseded), so it has to
     // say what to do rather than being an empty box.
     oric_ovl_text(1, 6, "No BASIC ROM file found in", ORIC_ATTR_NORMAL);
@@ -458,6 +541,52 @@ static void oric_select_rom(oric_t* sys, const char* name) {
   }
 }
 
+static void oric_set_msg(const char* text) {
+  (void)snprintf(oric_msg_buf, sizeof(oric_msg_buf), "%s", text);
+  oric_publish_msg();
+}
+
+static void oric_tapelist_open(void) {
+  oric_scan_tapes();
+  oric_list_sel = 0;
+  oric_ui_repaint();
+  oric_ui_state = ORIC_UI_TAPELIST;
+}
+
+static void oric_insert_tape(oric_t* sys, const char* name) {
+  char msg[ORIC_OVL_COLS + 1];
+  if (!sys->td.valid) {
+    return;
+  }
+  if (!oric_td_insert_tape_sdcard(&sys->td, name)) {
+    oric_ovl_clear(ORIC_ATTR_NORMAL);
+    (void)snprintf(msg, sizeof(msg), "Cannot load %s", name);
+    oric_ovl_text(1, 9, msg, ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 25, "F1=BACK", ORIC_ATTR_DIM);
+    oric_ovl_present(sys);
+    return;  // stay on the list
+  }
+  (void)snprintf(oric_tape_name, sizeof(oric_tape_name), "%s", name);
+  // Back to the emulator with the usual transient confirmation, so the user
+  // can go straight to CLOAD"".
+  (void)snprintf(msg, sizeof(msg), "Loading %s", name);
+  oric_ui_state = ORIC_UI_EMULATING;
+  sys->screen_dirty = true;
+  oric_set_msg(msg);
+}
+
+static void oric_eject_tape(oric_t* sys) {
+  if (!sys->td.valid || oric_tape_name[0] == '\0') {
+    oric_set_msg("No tape inserted");
+  } else {
+    oric_td_remove_tape_sdcard(&sys->td);
+    oric_tape_name[0] = '\0';
+    oric_set_msg("Tape ejected");
+  }
+  oric_ui_state = ORIC_UI_EMULATING;
+  sys->screen_dirty = true;
+}
+
 static bool oric_romlist_key(oric_t* sys, int code) {
   (void)sys;
   if (oric_file_count == 0) {
@@ -481,7 +610,11 @@ static bool oric_romlist_key(oric_t* sys, int code) {
       sel = (sel + ORIC_LIST_ROWS < n) ? sel + ORIC_LIST_ROWS : n - 1;
       break;
     case '\r':
-      oric_select_rom(sys, oric_files[sel]);
+      if (oric_ui_state == ORIC_UI_TAPELIST) {
+        oric_insert_tape(sys, oric_files[sel]);
+      } else {
+        oric_select_rom(sys, oric_files[sel]);
+      }
       return true;
     default:
       return true;
@@ -489,6 +622,64 @@ static bool oric_romlist_key(oric_t* sys, int code) {
   oric_list_sel = (uint16_t)sel;
   oric_ui_repaint();
   return true;
+}
+
+static void oric_status_render(oric_t* sys) {
+  char line[ORIC_OVL_COLS + 1];
+
+  oric_ovl_clear(ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 2, "STATUS", ORIC_ATTR_NORMAL);
+
+#ifdef RELEASE_VERSION
+  (void)snprintf(line, sizeof(line), "Version %s", RELEASE_VERSION);
+  oric_ovl_text(2, 4, line, ORIC_ATTR_DIM);
+#endif
+
+  SettingsConfigEntry* romEntry =
+      settings_find_entry(aconfig_getContext(), ACONFIG_PARAM_ROM);
+  const char* romName =
+      (romEntry && romEntry->value[0] != '\0') ? romEntry->value : "(none)";
+  (void)snprintf(line, sizeof(line), "ROM:  %s", romName);
+  oric_ovl_text(2, 6, line, ORIC_ATTR_NORMAL);
+  (void)snprintf(line, sizeof(line), "TAPE: %s",
+                 oric_tape_name[0] ? oric_tape_name : "(none)");
+  oric_ovl_text(2, 7, line, ORIC_ATTR_NORMAL);
+
+  // Conversion timing. Nothing is converted while this screen is up -- Core 1
+  // is rendering the menu, not the Oric screen -- so the numbers are a stable
+  // snapshot of the run up to the moment the menu was opened.
+  __dmb();
+  uint32_t count = oric_cvt_count;
+  uint32_t sum = oric_cvt_sum_us;
+  uint32_t lo = oric_cvt_min_us;
+  uint32_t hi = oric_cvt_max_us;
+
+  oric_ovl_text(2, 10, "Screen conversion (us)", ORIC_ATTR_NORMAL);
+  if (count == 0) {
+    oric_ovl_text(3, 12, "no frames measured yet", ORIC_ATTR_DIM);
+  } else {
+    const uint32_t mean = sum / count;
+    (void)snprintf(line, sizeof(line), "min  %lu", (unsigned long)lo);
+    oric_ovl_text(3, 12, line, ORIC_ATTR_DIM);
+    (void)snprintf(line, sizeof(line), "mean %lu", (unsigned long)mean);
+    oric_ovl_text(3, 13, line, ORIC_ATTR_DIM);
+    (void)snprintf(line, sizeof(line), "max  %lu", (unsigned long)hi);
+    oric_ovl_text(3, 14, line, ORIC_ATTR_DIM);
+    // 19968 us is Core 1's per-frame budget; the percentage is the number
+    // that actually matters when judging headroom.
+    (void)snprintf(line, sizeof(line), "%lu%% of the 19968 budget",
+                   (unsigned long)((mean * 100u) / 19968u));
+    oric_ovl_text(3, 16, line, ORIC_ATTR_DIM);
+  }
+
+  oric_ovl_text(1, 24, "HOME shows timing without", ORIC_ATTR_DIM);
+  oric_ovl_text(1, 25, "opening this menu. F1=BACK", ORIC_ATTR_DIM);
+  oric_ovl_present(sys);
+}
+
+static void oric_status_open(void) {
+  oric_ui_repaint();
+  oric_ui_state = ORIC_UI_STATUS;
 }
 
 static void oric_menu_open(void) {
@@ -521,11 +712,20 @@ static bool oric_menu_key(oric_t* sys, int code) {
         case 0:
           oric_romlist_open();
           break;
+        case 1:
+          oric_tapelist_open();
+          break;
+        case 2:
+          oric_eject_tape(sys);
+          break;
+        case 3:
+          oric_status_open();
+          break;
         case ORIC_MENU_ITEMS - 1:
           oric_menu_close(sys);
           break;
         default:
-          break;  // tape, eject and status arrive in EPIC-05
+          break;
       }
       return true;
     default:
@@ -533,14 +733,6 @@ static bool oric_menu_key(oric_t* sys, int code) {
   }
 }
 
-// EPIC-03 STORY-01: cost of oric_screen_update, sampled on Core 1 and read on
-// Core 0 when the stats key is pressed. Scalars, so volatile is enough to stop
-// the compiler caching them across the loop (D-13); the barrier before reading
-// keeps the four consistent with each other.
-static volatile uint32_t oric_cvt_min_us = 0xFFFFFFFFu;
-static volatile uint32_t oric_cvt_max_us = 0;
-static volatile uint32_t oric_cvt_sum_us = 0;
-static volatile uint32_t oric_cvt_count = 0;
 
 #ifndef ORIC_MSG_DISPLAY_SECONDS
 #define ORIC_MSG_DISPLAY_SECONDS 3u
@@ -675,6 +867,8 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
   if (code == 0x13A) {
     switch (oric_ui_state) {
       case ORIC_UI_ROMLIST:
+      case ORIC_UI_TAPELIST:
+      case ORIC_UI_STATUS:
         oric_ui_state = ORIC_UI_MENU;
         oric_ui_repaint();
         break;
@@ -692,9 +886,12 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
     (void)oric_menu_key(sys, code);
     return;
   }
-  if (oric_ui_state == ORIC_UI_ROMLIST) {
+  if (oric_ui_state == ORIC_UI_ROMLIST || oric_ui_state == ORIC_UI_TAPELIST) {
     (void)oric_romlist_key(sys, code);
     return;
+  }
+  if (oric_ui_state == ORIC_UI_STATUS) {
+    return;  // read-only screen; F1 above is the way out
   }
 
   switch (code) {
@@ -766,8 +963,11 @@ void __not_in_flash_func(core1_main()) {
         if (oric_ui_redraw) {
           oric_ui_redraw = false;
           __dmb();
-          if (oric_ui_state == ORIC_UI_ROMLIST) {
-            oric_romlist_render(&state.oric);
+          if (oric_ui_state == ORIC_UI_ROMLIST ||
+              oric_ui_state == ORIC_UI_TAPELIST) {
+            oric_list_render(&state.oric);
+          } else if (oric_ui_state == ORIC_UI_STATUS) {
+            oric_status_render(&state.oric);
           } else {
             oric_menu_render(&state.oric);
           }
@@ -787,6 +987,10 @@ void __not_in_flash_func(core1_main()) {
       } else {
         if (until_us != 0) {
           oric_msg_until_us = 0;
+          // The overlay was covering the Oric screen; force a repaint so it
+          // comes back even if the Oric has written nothing since (a tape
+          // load writes nothing to screen RAM for seconds).
+          state.oric.screen_dirty = true;
         }
         uint32_t cvt_t0 = time_us_32();
         if (oric_screen_update(&state.oric)) {
