@@ -87,6 +87,91 @@ uint16_t oric_via_queue_head;
 static volatile uint32_t oric_msg_until_us;
 static char oric_msg_buf[32];
 
+// ---------------------------------------------------------------------------
+// On-screen menu. Dispatcher shape follows md-gpu-demo's demo_menu.c: one key
+// owned for entering/leaving, everything else forwarded to whatever is active.
+// Here the owned key is F1 rather than ESC -- ESC is a real Oric key, whereas
+// the Oric has no function keys, so F1 is free (D-15, D-16).
+//
+// State is written on Core 0 (the key handler) and read on Core 1 (the
+// renderer), so it follows D-13: writer fills the payload, __dmb(), then
+// raises the flag; reader tests the flag, __dmb(), then reads the payload.
+// ---------------------------------------------------------------------------
+enum { ORIC_UI_EMULATING = 0, ORIC_UI_MENU = 1 };
+
+#define ORIC_MENU_ITEMS 5
+static const char* const oric_menu_items[ORIC_MENU_ITEMS] = {
+    "SELECT ROM", "SELECT TAPE", "EJECT TAPE", "STATUS", "RESUME"};
+
+static volatile uint8_t oric_ui_state = ORIC_UI_EMULATING;
+static volatile bool oric_ui_redraw = false;
+static volatile uint8_t oric_menu_sel = 0;
+
+#define ORIC_ATTR_NORMAL ORIC_OVL_ATTR(7, 0)  /* white on black */
+#define ORIC_ATTR_DIM ORIC_OVL_ATTR(6, 0)     /* cyan on black */
+#define ORIC_ATTR_HILITE ORIC_OVL_ATTR(0, 3)  /* black on yellow */
+
+static void oric_menu_render(oric_t* sys) {
+  oric_ovl_clear(ORIC_ATTR_NORMAL);
+  oric_ovl_text(8, 2, "ORIC EMULATOR", ORIC_ATTR_NORMAL);
+  oric_ovl_text(8, 3, "-------------", ORIC_ATTR_DIM);
+
+  const uint8_t sel = oric_menu_sel;
+  for (int i = 0; i < ORIC_MENU_ITEMS; i++) {
+    const int row = 7 + i * 2;
+    const uint8_t attr = (i == sel) ? ORIC_ATTR_HILITE : ORIC_ATTR_NORMAL;
+    // Highlight the whole bar, not just the text, so the selection reads
+    // clearly at 8x8 -- the cell attribute does the job a filled rect does
+    // in md-gpu-demo.
+    oric_ovl_fill(4, row, 22, attr);
+    oric_ovl_text(6, row, oric_menu_items[i], attr);
+  }
+
+  oric_ovl_text(2, 24, "UP/DN  RET=SELECT", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 25, "F1=CLOSE", ORIC_ATTR_DIM);
+  oric_ovl_present(sys);
+}
+
+static void oric_menu_open(void) {
+  oric_menu_sel = 0;
+  __dmb();
+  oric_ui_redraw = true;
+  oric_ui_state = ORIC_UI_MENU;
+}
+
+static void oric_menu_close(oric_t* sys) {
+  oric_ui_state = ORIC_UI_EMULATING;
+  // Force a full repaint of the Oric screen: the menu overwrote the
+  // framebuffer, and oric_screen_update only renders when something is dirty.
+  sys->screen_dirty = true;
+}
+
+// Returns true if the key was consumed by the menu.
+static bool oric_menu_key(oric_t* sys, int code) {
+  switch (code) {
+    case 0x152:  // UP
+      oric_menu_sel =
+          (uint8_t)((oric_menu_sel + ORIC_MENU_ITEMS - 1) % ORIC_MENU_ITEMS);
+      __dmb();
+      oric_ui_redraw = true;
+      return true;
+    case 0x151:  // DOWN
+      oric_menu_sel = (uint8_t)((oric_menu_sel + 1) % ORIC_MENU_ITEMS);
+      __dmb();
+      oric_ui_redraw = true;
+      return true;
+    case '\r':  // RETURN
+      // STORY-02 wires navigation only; the entries themselves land in
+      // STORY-03 onwards. RESUME is the one that already means something.
+      if (oric_menu_sel == ORIC_MENU_ITEMS - 1) {
+        oric_menu_close(sys);
+      }
+      return true;
+    default:
+      return true;  // menu owns the keyboard while it is open
+  }
+}
+
 // EPIC-03 STORY-01: cost of oric_screen_update, sampled on Core 1 and read on
 // Core 0 when the stats key is pressed. Scalars, so volatile is enough to stop
 // the compiler caching them across the loop (D-13); the barrier before reading
@@ -109,15 +194,6 @@ static volatile uint32_t oric_cvt_count = 0;
 static void oric_publish_msg(void) {
   __dmb();
   oric_msg_until_us = time_us_32() + (ORIC_MSG_DISPLAY_SECONDS * 1000u * 1000u);
-}
-
-static void oric_set_loading_msg(uint8_t fkey) {
-  if (fkey < 1 || fkey > 10) {
-    return;
-  }
-  (void)snprintf(oric_msg_buf, sizeof(oric_msg_buf), "Loading F%u file...",
-                 (unsigned)fkey);
-  oric_publish_msg();
 }
 
 // Show min / mean / max microseconds per conversion, then start a fresh
@@ -231,38 +307,22 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
 
   oric_t *sys = &state.oric;
 
-  switch (code) {
-    case 0x13A:  // F1
-    case 0x13B:  // F2
-    case 0x13C:  // F3
-    case 0x13D:  // F4
-    case 0x13E:  // F5
-    case 0x13F:  // F6
-    case 0x140:  // F7
-    case 0x141:  // F8
-    case 0x142:  // F9
-    case 0x143:  // F10
-    {
-      uint8_t index = code - 0x13A;
-      oric_set_loading_msg((uint8_t)(index + 1));
-      int num_nib_images = CHIPS_ARRAY_SIZE(oric_nib_images);
-      if (index < num_nib_images) {
-        if (sys->fdc.valid) {
-          disk2_fdd_insert_disk(&sys->fdc.fdd[0], oric_nib_images[index]);
-        }
-      } else {
-        index -= num_nib_images;
-        if (sys->td.valid) {
-          bool inserted = oric_td_insert_tape_sdcard(&sys->td, index);
-          if (!inserted) {
-            DPRINTF("oric: failed to insert tape image %d\n", index);
-          } else {
-            DPRINTF("oric: tape image %d inserted\n", index);
-          }
-        }
-      }
-      break;
+  // F1 owns the menu, in both directions.
+  if (code == 0x13A) {
+    if (oric_ui_state == ORIC_UI_MENU) {
+      oric_menu_close(sys);
+    } else {
+      oric_menu_open();
     }
+    return;
+  }
+  // While the menu is open it consumes everything; nothing reaches the Oric.
+  if (oric_ui_state == ORIC_UI_MENU) {
+    (void)oric_menu_key(sys, code);
+    return;
+  }
+
+  switch (code) {
 
     case 0x148:  // ST HOME: show conversion timing, then reset the window
       oric_show_cvt_stats();
@@ -290,6 +350,11 @@ void __not_in_flash_func(kbd_raw_key_up)(int code) {
       code = toupper(code);
     }
   }
+  // Swallow releases while the menu is open, and the F1 release always --
+  // otherwise the Oric sees a release for a press it never got.
+  if (oric_ui_state == ORIC_UI_MENU || code == 0x13A) {
+    return;
+  }
   kbd_key_up(&state.oric.kbd, code);
 }
 
@@ -314,6 +379,15 @@ void __not_in_flash_func(core1_main()) {
       last_blit_done = blit_done;
     }
     if (blitted || (int32_t)(now_us - next_update_us) >= 0) {
+      if (oric_ui_state == ORIC_UI_MENU) {
+        if (oric_ui_redraw) {
+          oric_ui_redraw = false;
+          __dmb();
+          oric_menu_render(&state.oric);
+        }
+        next_update_us = now_us + 19968;
+        continue;
+      }
       uint32_t until_us = oric_msg_until_us;
       if (until_us != 0 && (int32_t)(until_us - now_us) > 0) {
         // oric_msg_buf is written by Core 0 and is not volatile, so without a
