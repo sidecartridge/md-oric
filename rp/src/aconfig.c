@@ -4,6 +4,9 @@
 static SettingsConfigEntry defaultEntries[] = {
     {ACONFIG_PARAM_FOLDER, SETTINGS_TYPE_STRING, "/oric"},
     {ACONFIG_PARAM_MODE, SETTINGS_TYPE_INT, "255"},  // 255: Menu mode
+    // Empty until the user picks one, which is what makes the ROM menu open
+    // on first boot.
+    {ACONFIG_PARAM_ROM, SETTINGS_TYPE_STRING, ""},
 };
 
 // Create a global context for our settings
