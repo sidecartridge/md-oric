@@ -327,11 +327,9 @@ int __not_in_flash_func(oric_main)() {
     DPRINTF("rom.img load error: %d\n", rom_load_result);
     oric_show_msg(&state.oric, "NO ROM FOUND");
     while (1) {
-      state.oric.fb_frame_counter++;
-      uint8_t *fb_base = (uint8_t *)&__rom_in_ram_start__;
-      uint16_t *fb_counter =
-          (uint16_t *)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
-      *fb_counter = state.oric.fb_frame_counter;
+      // Re-render rather than bump the counter: with two buffers a bare
+      // increment would point the ST at the buffer the message is not in.
+      oric_show_msg(&state.oric, "NO ROM FOUND");
       sleep_ms(1000);
     }
   }

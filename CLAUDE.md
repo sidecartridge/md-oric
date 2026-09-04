@@ -64,12 +64,14 @@ A **two-target build**: m68k assembly that runs on the Atari ST is assembled int
 ### Frame pipeline (RP → ST)
 
 1. **Core 1 (`core1_main` in `oric.c`)** wakes every 19968 µs and calls `oric_screen_update(&state.oric)` — or `oric_show_msg` while a transient "Loading Fn file…" message is active. That function walks the Oric's 240×224 screen, expands attributes/pattern bits through `oric_pat_lut`, and writes **ST planar 3-bitplane** data straight into the cartridge window at offset `0x1000`.
-2. **Core 1 then increments `sys->fb_frame_counter`** and writes it as a `uint16_t` to offset `0x0FFC` of the window. That counter is the dirty signal; the ST page is chosen by the m68k, not by this value.
+2. **Core 1 then publishes the frame counter** as a `uint16_t` at offset `0x0FFC` of the window. The counter is both the dirty signal and, in bit 0, the identity of the framebuffer holding the frame (`_oric_fb_for_count`). The ST *page* (`$60000`/`$70000`) is separate and chosen by the m68k.
 3. **The m68k VBL loop** (`.loop_low_st` in `main.s`) waits for the VBL flag, drains the AY queue, then compares the word at `FRAMECOUNT_ADDR` against its saved copy. Unchanged → go back to sleep. Changed → run the unrolled copy loop.
-4. **The copy loop** does 224 iterations of a fully unrolled `move.l`/`move.w` block — 15 longword+word pairs = 90 bytes per line — from `FRAMEBUFFER_A_ADDR` into `SCREEN_A_BASE_ADDR + CENTERED_XPOS` (`$60000 + 16`) or `SCREEN_B_BASE_ADDR + CENTERED_XPOS` (`$70000 + 16`), advancing the destination by 160 bytes (a full ST line) each row. The 16-byte X offset centres the 240-pixel Oric screen in the 320-pixel ST line.
+4. **The copy loop** does 224 iterations of a fully unrolled `move.l`/`move.w` block — 15 longword+word pairs = 90 bytes per line — from `FRAMEBUFFER_A_ADDR` or `FRAMEBUFFER_B_ADDR` (selected by `btst #0` on the counter, outside the loop) into `SCREEN_A_BASE_ADDR + CENTERED_XPOS` (`$60000 + 16`) or `SCREEN_B_BASE_ADDR + CENTERED_XPOS` (`$70000 + 16`), advancing the destination by 160 bytes (a full ST line) each row. The 16-byte X offset centres the 240-pixel Oric screen in the 320-pixel ST line.
 5. **The m68k flips the video base** (`$FFFF8201`/`$8203`) to the page it just filled, then alternates `.page_flag` so the next blit targets the other page. Page selection is entirely the m68k's — it deliberately does *not* derive from the RP's counter, because a value-derived page dropped a frame whenever the RP completed two frames inside one ST frame. One frame of display latency is inherent here: the ST cannot display the cartridge framebuffer directly, so the blit must finish before the shifter can show it.
 
-There is **no chunky→planar step on the RP** and no double-buffering of the cartridge framebuffer — Core 1 writes planar data in place, into the single buffer the m68k is reading. Tearing is traded for RAM and cycles.
+There is **no chunky→planar step on the RP** — Core 1 writes ST planar data directly. The cartridge framebuffer is double-buffered (A at `$FA1000`, B at `$FA8000`): Core 1 renders into the buffer named by bit 0 of the counter it is about to publish, so it normally never writes the one the m68k is blitting. Not yet fully tear-proof — Core 1 renders every 19968 µs and the m68k blits every ~20000 µs, so Core 1 can occasionally lap and reclaim a buffer still being read; closing that needs the blit-finished handshake (D-10).
+
+**Cross-core data needs barriers (D-13).** `oric_msg_buf` is written by Core 0 and read by Core 1; without the `__dmb()` pair in `oric_set_loading_msg` / `core1_main` the compiler may cache the first byte in a register and silently skip the overlay forever. Any new Core 0 ↔ Core 1 signal must follow the same flag-plus-payload pattern.
 
 ### Keyboard pipeline (ST → RP)
 
@@ -89,7 +91,7 @@ The emulated PSG's register writes are not synthesised on the RP; they are **rep
 
 ### Atari ST side (`target/atarist/`)
 - `src/main.s` — the entire m68k side: cartridge header, boot, IRQ setup, VBL copy loop, Timer-B handler, overscan, reset. Lives at `$FA0000` (ROM4 cartridge region). `pre_auto` (CA_INIT bit 27, after GEMDOS init) checks the resolution, **copies the first `$1000` bytes of the cartridge image to `$50000`** (`SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET`, safely below screen memory) and jumps there — everything afterwards runs from ST RAM, not from the cart, which is why every internal reference is written as `SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (label - ROM4_ADDR)`.
-- **Cart code must stay under `$0FFC`** — that is where the frame counter lives, and the framebuffer starts right after at `$1000`. This is the real size budget, not the 64 KB window.
+- **Cart code must stay under `$0FFC`** — that is where the frame counter lives, and framebuffer A starts right after at `$1000`. This is the real size budget, not the 64 KB window.
 - **No Atari RAM allocation**: the code uses no `.bss` and no heap. Its handful of variables live inside the copied code block itself, addressed through A6: `.vblank_flag` (a6+0), `.last_framecount` (a6+2), `.page_flag` (a6+4), `.overscan_flag` (a6+6), `.aybuff_pos` (a6+8, the slot `AYBUFF_POS` names). Those offsets are load-bearing — `AYBUFF_POS` is an `equ`, so a variable added or resized above it silently moves it.
 - `src/inc/tos.s` — TOS/XBIOS equates and the `print` macro.
 - **Dead code to be aware of**: the `check_keys` and `check_commands` macros, `rom_function`, `LISTENER_ADDR` and `CMD_BOOSTER` are all defined but never invoked in the current path (leftovers from the microfirmware template's command-dispatch protocol). Note that `check_keys` also has its press/release branches inverted relative to the live `.timerb_routine` — don't use it as a reference.
@@ -102,7 +104,8 @@ The Atari ST sees the ROM4 window at `$FA0000`; the RP2040 backs it with the 32 
 | --- | --- | --- | --- | --- |
 | `0x0000` | `$FA0000` | `ROM4_ADDR` | `$1000` | Cartridge image (`main.s`), ~1.3 KB used. Copied to `$50000` at boot and executed from there. |
 | `0x0FFC` | `$FA0FFC` | `FRAMECOUNT_ADDR` / `ATARI_ST_FRAME_COUNTER_OFFSET` | 2 B (+2 B pad) | Frame counter. RP increments a `uint16_t` after each completed `oric_screen_update`; m68k `cmp.w`s it against its own saved copy once per VBL and re-blits on any change. Free to wrap — only inequality is tested. **16-bit deliberately:** an m68k `move.l` is two word reads, so a 32-bit value written natively by the RP would arrive with its halfwords swapped. The page (`$60000` vs `$70000`) is chosen by the m68k, which alternates locally. |
-| `0x1000` | `$FA1000` | `FRAMEBUFFER_A_ADDR` / `ATARI_ST_FRAMEBUFFERS_OFFSET` | 20160 B | The Oric screen, already in ST planar form: 224 lines × 90 bytes (240 px × 3 bitplanes). |
+| `0x1000` | `$FA1000` | `FRAMEBUFFER_A_ADDR` / `ATARI_ST_FRAMEBUFFER_A_OFFSET` | 20160 B | Framebuffer A. The Oric screen in ST planar form: 224 lines × 90 bytes (240 px × 3 bitplanes). |
+| `0x8000` | `$FA8000` | `FRAMEBUFFER_B_ADDR` / `ATARI_ST_FRAMEBUFFER_B_OFFSET` | 20160 B | Framebuffer B. Core 1 renders each frame into the buffer named by **bit 0 of the counter value it is about to publish**, so no extra shared field is needed. Backed by `ORIC_ROM_IN_RAM`, free since `oric_rom` moved to `ORIC_RAM`. |
 | `0x5EC0` | `$FA5EC0` | `AYBUFFER_ADDR` / `ATARI_ST_VIA_QUEUE_OFFSET` | 512 B | AY register-write ring: 16-bit (register, value) entries, `$FFFF` terminator. RP pushes, m68k drains at VBL. |
 | — | `$FAF000` | `ROMCMD_START_ADDR` | — | Not storage — a **read-only signalling window**. The m68k forwards key events by reading dummy bytes here; the RP's DMA IRQ records the address. Values read are meaningless and discarded (`tst.b`). |
 
@@ -115,6 +118,7 @@ The Atari ST sees the ROM4 window at `$FA0000`; the RP2040 backs it with the 32 
 - `reload/systems/oric/src/oric.h` — header **and implementation** (`CHIPS_IMPL` style, defined by `oric.c`): `oric_init`, `oric_tick`, the memory map, `oric_screen_update`, `oric_show_msg`, and the `ATARI_ST_*` layout macros. The bulk of the emulator behaviour lives here, not in the `.c`.
 - `reload/chips/*.h` — header-only chip models from Reload Emulator: `mos6502cpu.h` (the big one, ~8k lines of generated cycle-stepped 6502), `mos6522via.h`, `ay38910psg.h`, `mem.h`, `kbd.h`, `clk.h`, `beeper.h`, `wdc65C02cpu.h` (unused on Oric).
 - `reload/devices/*.h` — `oric_td.h` (tape drive: reads `fN.wav` from SD, converts `fN.tap` → `fN.wav` on first use), `disk2_fdc.h` / `disk2_fdd.h` (Disk II controller, carried over from the upstream Apple II support), `oric_fdc_rom.h` (512-byte boot ROM blob).
+- **The ST-visible cart window is a full, linear 64 KB.** The PIO preloads `__rom_in_ram_start__ >> 16` into the ISR and shifts the 16 bus address bits in beneath it, so a read at `$FAxxxx` resolves to `0x20030000 | xxxx`: offsets `$0000`–`$7FFF` are backed by `ROM_IN_RAM`, `$8000`–`$FFFF` by `ORIC_ROM_IN_RAM`. That is why framebuffer B at `$FA8000` and the `$FAF000` signalling window both work.
 - `reload/images/oric_images.h` — built-in image table. The committed version is **empty** (`oric_nib_images[] = {}`); `oric_images.h.example` shows the shape when images are baked in. F-key indices past the end of this array fall through to SD-card tape loading, which is the normal path.
 - `kbdmap.c` / `include/kbdmap.h` — Atari ST GSX scancode → Oric key translation: a `[128][2]` unshifted/shifted table plus `kbdmap_initOric()` fixups and the `kbdmap_isShift` / `kbdmap_isCtrl` predicates.
 - `romemul.c` / `romemul.pio` — PIO + DMA cartridge ROM emulation (address in from `READ_ADDR_GPIO_BASE`, data out on the same pins, `ROM4_GPIO` as the bank select). Grants the DMA top bus priority. `init_romemul(request_cb, response_cb, copyFlashToRAM)` optionally installs an IRQ on either DMA channel — this app uses the response one.
@@ -135,9 +139,9 @@ The RP2040's flash and RAM are sliced into named regions, and code is responsibl
 | `GLOBAL_LOOKUP_FLASH` | `0x101FE000` | 4 K | UUID → config-sector lookup |
 | `GLOBAL_CONFIG_FLASH` | `0x101FF000` | 4 K | Global config |
 | `RAM` | `0x20000000` | 128 K | Normal RAM |
-| `ORIC_RAM` | `0x20020000` | 64 K | `.oric_ram` section — `oric_pat_lut`, `line_buff` and other hot emulator tables |
+| `ORIC_RAM` | `0x20020000` | 64 K | `.oric_ram` section — `oric_pat_lut`, `line_buff`, and the 16 KB `oric_rom[]` loaded from `rom.img` (25200 B used, 40336 free) |
 | `ROM_IN_RAM` | `0x20030000` | 32 K | The cartridge window the Atari reads (`__rom_in_ram_start__`) |
-| `ORIC_ROM_IN_RAM` | `0x20038000` | 32 K | `.oric_rom_in_ram` section — the 16 KB `oric_rom[]` loaded from `rom.img` |
+| `ORIC_ROM_IN_RAM` | `0x20038000` | 32 K | Upper half of the ST-visible cart window (`$FA8000`–`$FAFFFF`); holds framebuffer B. The `.oric_rom_in_ram` section is empty — the region exists to reserve the address space |
 
 Place data with `__attribute__((section(".oric_ram")))` / `".oric_rom_in_ram"`; the linker script exports `__oric_ram_start__`, `__rom_in_ram_start__` and `__oric_rom_in_ram_start__` for code that needs the base addresses (declared in `constants.h`).
 

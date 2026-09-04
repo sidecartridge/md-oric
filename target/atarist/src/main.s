@@ -279,7 +279,12 @@ start_rom_code:
 	cmp.w 2(a6), d0
  	beq.s .loop_low_st ; Counter unchanged: no new frame, wait for next VBL
 
-	lea FRAMEBUFFER_B_ADDR, a0	; Increment 3: blit only from B, no alternation
+	; Bit 0 of the counter names the buffer the RP just finished writing.
+	lea FRAMEBUFFER_A_ADDR, a0
+	btst #0, d0
+	beq.s .src_chosen
+	lea FRAMEBUFFER_B_ADDR, a0
+.src_chosen:
 	move.w #ORIC_LINES-1, d7		; Number of lines to copy
 
 	move.w d0, 2(a6)	; Remember the counter we are about to blit
