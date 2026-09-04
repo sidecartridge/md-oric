@@ -42,39 +42,65 @@ After installation, the Oric Emulator will start automatically every time your A
 
 ## 🕹️ Usage
 
-### Configuration
+### Setting up the microSD card
 
-The emulator requires an image file with the Oric ROM to function. There are
-plenty of Oric ROM images available online, try searching for "orica.zip" or
-similar. Once you have the ROM image, rename it to `rom.img` and copy it to the
-directory `/oric` on the SidecarTridge microSD card.
+Everything lives in the `/oric` directory on the SidecarTridge microSD card.
 
-This should be enough to get started, but if you want to load applications and games, copy `.TAP` or `.WAV` files to the same `/oric` directory with the following structure:
+**ROMs.** Copy one or more Oric ROM images there with a `.rom` extension — for
+example `basic11b.rom`. They must be 16 KB. There are plenty of Oric ROM images
+online; search for "orica.zip" or similar, or see the
+[microfirmware documentation](https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/oric-emulator/).
 
-- `f1.tap` or `f1.wav` - second tape file, loaded when pressing the F1 key.
-- `f2.tap` or `f2.wav` - third tape file, loaded when pressing the F2 key.
-- and so on...
+**Tapes.** Copy `.tap` files to the same directory. Any filename works — you
+pick them from a menu, so there is no naming convention to remember.
 
-Once the files are in place, launch the Oric Emulator app from the Booster interface or by rebooting your Atari with the Multi-device set to auto-launch the app.
+That is all the setup there is. Subdirectories, hidden files and system files
+are ignored, so a card written from macOS or Windows will not show stray
+entries.
 
-### Emulator Controls
+### First run
 
-The emulator currently only supports file loading from tape or wave images. Use the
-following keys to load the corresponding tape files:
+On the first boot the emulator needs to know which ROM to use:
 
-* **F1** → Load `f1.tap` or `f1.wav` in the virtual cassette drive.
-* **F2** → Load `f2.tap` or `f2.wav` in the virtual cassette drive.
-* **F3** → Load `f3.tap` or `f3.wav` in the virtual cassette drive.
-* and so on...
+- If the card holds **exactly one** `.rom` file, it is installed automatically
+  and the emulator starts.
+- If it holds **several**, a list appears and you choose one.
+- If it holds **none**, the screen tells you what to copy where.
 
-If the file is of TAP format, it will convert it to WAV format and will save a copy
-as `fX.wav` in the same directory for future use.
+Installing a ROM copies it into place and reboots the Multi-device, which takes
+a couple of seconds. The choice is remembered, so later boots go straight to the
+Oric.
 
-After loading the tape file, use the command `CLOAD""` in the Oric BASIC prompt to load the program from the virtual tape.
+### The menu
 
-You can find plenty of Oric software online in places like [Oric.org](http://www.oric.org/).
+Press **F1** at any time to open the menu:
 
-The `HELP` button will perform a soft reset of the Oric machine. The `UNDO` button will pause the emulation.
+| Entry | What it does |
+| --- | --- |
+| **SELECT ROM** | Choose a different ROM and restart with it |
+| **SELECT TAPE** | Insert a `.tap` into the virtual cassette drive |
+| **EJECT TAPE** | Remove the current tape |
+| **STATUS** | Version, current ROM and tape, and emulator timing |
+| **RESUME** | Back to the Oric |
+
+Use the **arrow keys** to move, **Return** to choose, and **F1** to go back a
+level or close the menu. Lists longer than one page scroll with up/down, and
+left/right jump a page at a time.
+
+After inserting a tape, type `CLOAD""` at the Oric BASIC prompt to load it. A
+green progress bar along the bottom of the screen shows how far through the tape
+you are, and `TAPE FINISHED` appears briefly when it reaches the end — so you can
+tell a load that is working from one that has stalled. You can find plenty of
+Oric software online in places like [Oric.org](http://www.oric.org/).
+
+### Other keys
+
+| Key | Action |
+| --- | --- |
+| **F1** | Open or close the menu |
+| **HELP** | Soft reset of the Oric |
+| **UNDO** | Non-maskable interrupt (break) |
+| **HOME** | Show screen-conversion timing without opening the menu |
 
 ### ⏏️ Exiting to Booster
 
@@ -118,20 +144,24 @@ GitHub repository.
 
 ### Missing features, future roadmap
 
-This is a solid first release and a fun experiment, but there is plenty of room
-to improve.
+Done since the first release:
 
-- [ ] Better framebuffer. It refreshes at 50 Hz, but shows the previous frame
-  instead of the latest one.
+- [x] TAP file load menu — tapes are chosen from an on-screen list instead of
+  function keys.
+- [x] Direct TAP file load — `.tap` files play as they are read, with no
+  conversion step and nothing written to your card.
+- [x] Faster framebuffer build — the Oric-to-Atari screen conversion is about
+  30% cheaper per frame.
+- [x] Better framebuffer — dropped frames and tearing are gone. One frame of
+  latency remains and is inherent: the Atari has to copy the screen before it
+  can show it.
+
+Still open:
+
 - [ ] Joystick/gamepad support.
-- [ ] Floppy disk support. I removed it to save CPU cycles, but that is not the
-  right place to cut.
-- [ ] TAP file load menu. The function key solution is functional, but clunky.
-- [ ] Faster framebuffer build. Creating the Atari ST framebuffer from the Oric
-  screen needs to be more efficient.
-- [ ] Performance improvements.
-- [ ] Direct TAP file load. The current code converts to WAV; it works, but is
-  not ideal.
+- [ ] Floppy disk support. It was removed to save CPU cycles, and the
+  conversion work above has bought back some of the budget it needs.
+- [ ] Further performance improvements.
 
 ## License
 
