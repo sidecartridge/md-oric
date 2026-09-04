@@ -54,6 +54,7 @@
 #include "hardware/irq.h"
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/structs/ssi.h"
+#include "hardware/sync.h"
 #include "hardware/vreg.h"
 #include "kbdmap.h"
 #include "oric.h"
@@ -89,12 +90,19 @@ static char oric_msg_buf[32];
 #define ORIC_MSG_DISPLAY_SECONDS 3u
 #endif
 
+// Free-running fallback period when no blit-finished signal is arriving. Longer
+// than a PAL frame so it never races the ST when the handshake is healthy.
+#define ORIC_FRAME_FALLBACK_US 25000u
+
 static void oric_set_loading_msg(uint8_t fkey) {
   if (fkey < 1 || fkey > 10) {
     return;
   }
   (void)snprintf(oric_msg_buf, sizeof(oric_msg_buf), "Loading F%u file...",
                  (unsigned)fkey);
+  // Message buffer (payload) then deadline (flag): Core 1 keys off the flag,
+  // so the text must be complete and visible before the flag is raised.
+  __dmb();
   oric_msg_until_us = time_us_32() + (ORIC_MSG_DISPLAY_SECONDS * 1000u * 1000u);
 }
 
@@ -114,7 +122,7 @@ static inline void flash_set_baud_div(uint16_t div) {
   ssi_hw->baudr = div;
 }
 
-uint8_t __attribute__((section(".oric_rom_in_ram")))
+uint8_t __attribute__((section(".oric_ram")))
 __attribute__((aligned(4))) oric_rom[ORIC_ROM_SIZE] = {0};
 
 // Get oric_desc_t struct based on joystick type
@@ -250,11 +258,30 @@ void gamepad_state_update(uint8_t index, uint8_t hat_state,
 
 void __not_in_flash_func(core1_main()) {
   uint32_t next_update_us = time_us_32();
+  uint32_t last_blit_done = emul_blitDoneCount;
   while (1) {
     uint32_t now_us = time_us_32();
-    if ((int32_t)(now_us - next_update_us) >= 0) {
+    // Pace on the m68k's "blit finished" signal rather than free-running, so a
+    // frame is never started while the ST is still reading the buffer it would
+    // land in, and Core 1 stops drifting against the ST's VBL (D-12, D-10).
+    // The timeout is the safety net: the m68k stops signalling whenever the ST
+    // is reset or running anything but the blit loop, and a Core 1 that waited
+    // forever would be a dead display with no obvious cause.
+    uint32_t blit_done = emul_blitDoneCount;
+    bool blitted = (blit_done != last_blit_done);
+    if (blitted) {
+      __dmb();
+      last_blit_done = blit_done;
+    }
+    if (blitted || (int32_t)(now_us - next_update_us) >= 0) {
       uint32_t until_us = oric_msg_until_us;
       if (until_us != 0 && (int32_t)(until_us - now_us) > 0) {
+        // oric_msg_buf is written by Core 0 and is not volatile, so without a
+        // barrier here the compiler may keep oric_msg_buf[0] in a register
+        // across iterations: it then sees the empty buffer from boot forever,
+        // the inlined `*msg == '\0'` check skips oric_show_msg, and nothing
+        // renders for the whole message window (display freezes, no overlay).
+        __dmb();
         oric_show_msg(&state.oric, oric_msg_buf);
       } else {
         if (until_us != 0) {
@@ -262,7 +289,7 @@ void __not_in_flash_func(core1_main()) {
         }
         (void)oric_screen_update(&state.oric);
       }
-      next_update_us = now_us + 19968;
+      next_update_us = now_us + ORIC_FRAME_FALLBACK_US;
     }
   }
   __builtin_unreachable();
@@ -317,11 +344,9 @@ int __not_in_flash_func(oric_main)() {
     DPRINTF("rom.img load error: %d\n", rom_load_result);
     oric_show_msg(&state.oric, "NO ROM FOUND");
     while (1) {
-      state.oric.fb_frame_counter++;
-      uint8_t *fb_base = (uint8_t *)&__rom_in_ram_start__;
-      uint16_t *fb_counter =
-          (uint16_t *)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
-      *fb_counter = state.oric.fb_frame_counter;
+      // Re-render rather than bump the counter: with two buffers a bare
+      // increment would point the ST at the buffer the message is not in.
+      oric_show_msg(&state.oric, "NO ROM FOUND");
       sleep_ms(1000);
     }
   }

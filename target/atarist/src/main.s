@@ -26,6 +26,7 @@
 ROM4_ADDR			equ $FA0000
 CENTERED_XPOS		equ 16 ; Centered X position for Oric low res. 16 bytes (32 pixels) margin on left side
 FRAMEBUFFER_A_ADDR	equ (ROM4_ADDR + $1000)
+FRAMEBUFFER_B_ADDR	equ (ROM4_ADDR + $8000) ; Upper half of the window, freed from the Oric ROM
 AYBUFFER_ADDR		equ (FRAMEBUFFER_A_ADDR + (ORIC_LINES*ORIC_WORDS_PER_LINE*2*3)) ; AY sound buffer after the framebuffer
 AYBUFFER_SIZE		equ 512 ; Size of the AY sound buffer in bytes
 COPIED_CODE_OFFSET	equ $00010000 ; The offset should be below the screen memory
@@ -46,6 +47,7 @@ ROMCMD_START_ADDR:        equ (ROM4_ADDR + $F000)         ; The start address of
 CMD_KEYPRESS		   	  equ ($0BCD) 					  ; Key press
 CMD_KEYRELEASE		      equ ($0CBA) 					  ; Key release
 CMD_BOOSTER		      	  equ ($0DEF) 					  ; Booster command
+CMD_BLITDONE		      equ ($0ACE)					  ; Blit finished, RP may reuse the other buffer
 
 LISTENER_ADDR		      equ (ROM4_ADDR + $5F8)		  ; The address of the listener
 REMOTE_RESET		      equ $1					      ; The device ask to reset the
@@ -278,7 +280,12 @@ start_rom_code:
 	cmp.w 2(a6), d0
  	beq.s .loop_low_st ; Counter unchanged: no new frame, wait for next VBL
 
+	; Bit 0 of the counter names the buffer the RP just finished writing.
 	lea FRAMEBUFFER_A_ADDR, a0
+	btst #0, d0
+	beq.s .src_chosen
+	lea FRAMEBUFFER_B_ADDR, a0
+.src_chosen:
 	move.w #ORIC_LINES-1, d7		; Number of lines to copy
 
 	move.w d0, 2(a6)	; Remember the counter we are about to blit
@@ -326,6 +333,7 @@ start_rom_code:
 	move.w #1, 4(a6)	; Next blit targets page B
 	move.b  #(SCREEN_A_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
 	move.b  #((SCREEN_A_BASE_ADDR >> 8) & $ff), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	tst.b (ROMCMD_START_ADDR + CMD_BLITDONE)	; Tell the RP the blit is done
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 
 .fb_b:
@@ -368,6 +376,7 @@ start_rom_code:
 	clr.w 4(a6)			; Next blit targets page A
 	move.b  #(SCREEN_B_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
 	move.b  #((SCREEN_B_BASE_ADDR >> 8) & $ff), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	tst.b (ROMCMD_START_ADDR + CMD_BLITDONE)	; Tell the RP the blit is done
 
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 

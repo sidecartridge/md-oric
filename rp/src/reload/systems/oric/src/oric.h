@@ -119,6 +119,11 @@ extern uint8_t oric_rom[ORIC_ROM_SIZE];
 // 16-bit value crosses the bus intact (the PIO's DMA does a halfword load).
 // Bytes 0x0FFE-0x0FFF are unused padding up to the framebuffer at 0x1000.
 #define ATARI_ST_FRAME_COUNTER_OFFSET 0x0FFCu
+// The two framebuffers. B sits in the upper half of the 64 KB window, freed by
+// moving oric_rom into ORIC_RAM. The window is linear: the PIO builds the read
+// address as 0x20030000 | addr16, so $8000+ is backed by ORIC_ROM_IN_RAM.
+#define ATARI_ST_FRAMEBUFFER_A_OFFSET ATARI_ST_FRAMEBUFFERS_OFFSET
+#define ATARI_ST_FRAMEBUFFER_B_OFFSET 0x8000u
 #define ATARI_ST_VIA_QUEUE_SIZE_BYTES 512u
 #define ATARI_ST_VIA_QUEUE_OFFSET \
   (ATARI_ST_FRAMEBUFFERS_OFFSET + ATARI_ST_FRAMEBUFFER_SIZE_BYTES)
@@ -243,7 +248,9 @@ void oric_init(oric_t* sys, const oric_desc_t* desc) {
 
   memset(sys, 0, sizeof(oric_t));
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
-  sys->fb = (uint16_t*)(fb_base + ATARI_ST_FRAMEBUFFERS_OFFSET);
+  // Each render re-targets sys->fb from the counter (see _oric_fb_for_count);
+  // this is only the value before the first frame.
+  sys->fb = (uint16_t*)(fb_base + ATARI_ST_FRAMEBUFFER_A_OFFSET);
   sys->valid = true;
   sys->debug = desc->debug;
   sys->audio_callback = desc->audio.callback;
@@ -630,12 +637,23 @@ static uint8_t oric_no_rom_glyph_row(char c, int row) {
   }
 }
 
+// A frame is rendered into the buffer named by bit 0 of the counter value it
+// will publish. The m68k reads that same counter and picks the same buffer
+// with `btst #0`, so the two sides agree without any extra shared field.
+static inline uint16_t* _oric_fb_for_count(uint16_t count) {
+  uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
+  return (uint16_t*)(fb_base + ((count & 1u) ? ATARI_ST_FRAMEBUFFER_B_OFFSET
+                                             : ATARI_ST_FRAMEBUFFER_A_OFFSET));
+}
+
 void oric_show_msg(oric_t* sys, const char* msg) {
   CHIPS_ASSERT(sys && sys->valid);
   if (!msg || *msg == '\0') {
     return;
   }
-  uint16_t* restrict fb = sys->fb;
+  uint16_t next_count = (uint16_t)(sys->fb_frame_counter + 1u);
+  uint16_t* restrict fb = _oric_fb_for_count(next_count);
+  sys->fb = fb;
   memset(fb, 0, ATARI_ST_FRAMEBUFFER_SIZE_16WORDS * sizeof(uint16_t));
 
   const int glyph_w = 6;
@@ -707,10 +725,10 @@ void oric_show_msg(oric_t* sys, const char* msg) {
     }
   }
 
-  sys->fb_frame_counter++;
+  sys->fb_frame_counter = next_count;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
   uint16_t* fb_counter = (uint16_t*)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
-  *fb_counter = sys->fb_frame_counter;
+  *fb_counter = next_count;
   sys->screen_dirty = false;
 }
 
@@ -724,7 +742,9 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
   uint8_t pattr = sys->pattr;
   uint8_t* restrict ram = sys->ram;
 
-  uint16_t* restrict fb = sys->fb;
+  uint16_t next_count = (uint16_t)(sys->fb_frame_counter + 1u);
+  uint16_t* restrict fb = _oric_fb_for_count(next_count);
+  sys->fb = fb;
 
   for (int y = 0; y < 224; y++) {
     uint16_t* restrict dst_line =
@@ -823,10 +843,10 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
   }
   sys->pattr = pattr;
 
-  sys->fb_frame_counter++;
+  sys->fb_frame_counter = next_count;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
   uint16_t* fb_counter = (uint16_t*)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
-  *fb_counter = sys->fb_frame_counter;
+  *fb_counter = next_count;
 
   sys->screen_dirty = false;
   return 1;

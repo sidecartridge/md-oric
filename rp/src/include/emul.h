@@ -35,6 +35,7 @@ enum {
 #define CMD_KEYPRESS 0x0BCD    // Key press
 #define CMD_KEYRELEASE 0x0CBA  // Key release
 #define CMD_BOOSTER 0x0DEF     // Booster command
+#define CMD_BLITDONE 0x0ACE    // m68k finished blitting the cart framebuffer
 
 /**
  * @brief
@@ -45,6 +46,12 @@ enum {
  * user interaction and potential system resets.
  */
 void emul_start();
+
+// Bumped by the DMA IRQ each time the m68k signals "blit finished". Read by
+// Core 1 to pace rendering. Deliberately NOT routed through the address ring:
+// oric_main pops at most one ring entry per frame, so a per-frame event there
+// would starve keyboard input (D-14).
+extern volatile uint32_t emul_blitDoneCount;
 
 // Ring buffer for DMA LSB lookup values.
 void __not_in_flash_func(emul_addrlog_clear)(void);
