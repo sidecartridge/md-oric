@@ -152,6 +152,31 @@ The build assumes Core 0 owns flash writes (`PICO_FLASH_ASSUME_CORE0_SAFE=1`). *
 ### App identity
 `CURRENT_APP_UUID_KEY` (set from the `APP_UUID_KEY` env var at CMake time, with a placeholder default) is the app's UUID4. It must match the `uuid` field in the built `desc/app.json` and is the key into `GLOBAL_LOOKUP_FLASH` that locates this app's config sector. Mismatch → the app jumps to Booster.
 
+## Reference implementations — look here before inventing
+
+Two sibling repos solve the same problem on the same silicon (RP2040 driving an
+Atari ST over the cartridge bus) and are **the** first place to look before
+writing anything new here. Port from them, with comments and attribution intact,
+rather than reinventing:
+
+- **`../md-framebuffer-template`** — the framebuffer/audio/input template.
+  `rp/src/include/font8x8.h` + the `FB_FONT` descriptor (already ported here as
+  `rp/src/include/font8x8.h` / `font.h`); `fb_chunked_asm.S` for the
+  multiplication-based chunky→planar transpose
+  (`(((q >> K) & 0x01010101) * 0x80402010) >> 28`) and the `ldmia`/`stmia` bulk
+  copy; `fb_chunked.c` for the Core 0/Core 1 FIFO dispatch; per-file
+  `#pragma GCC optimize("O3")` and `__not_in_flash_func` on hot paths;
+  `cart_shared.h` for shared-region layout discipline.
+- **`../md-gpu-demo`** — the same template with a worked demo suite. The
+  `demo_*.c` files are the reference for per-frame optimisation technique:
+  8.8 fixed point with sin/cos LUTs, power-of-two `&`-mask tiling, the SIO
+  interpolator in texture-mapping mode, and the dual-core band split.
+
+Note what does **not** transfer and why: md-oric has no chunked framebuffer
+(Core 1 writes ST planar directly), and both cores are already committed —
+Core 0 to the 6502, Core 1 to the screen conversion (D-04) — so the template's
+Core 0/Core 1 band split cannot be copied as-is.
+
 ## Editing guardrails
 
 - **Never modify** `pico-sdk/` or `fatfs-sdk/` — they are git submodules pinned to specific upstream revisions, and `rp/build.sh` re-pins them on every run. To change FatFs configuration, edit `rp/src/ff/ffconf.h` (project-owned override).
