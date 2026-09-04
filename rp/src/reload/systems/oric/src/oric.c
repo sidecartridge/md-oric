@@ -90,6 +90,10 @@ static char oric_msg_buf[32];
 #define ORIC_MSG_DISPLAY_SECONDS 3u
 #endif
 
+// Free-running fallback period when no blit-finished signal is arriving. Longer
+// than a PAL frame so it never races the ST when the handshake is healthy.
+#define ORIC_FRAME_FALLBACK_US 25000u
+
 static void oric_set_loading_msg(uint8_t fkey) {
   if (fkey < 1 || fkey > 10) {
     return;
@@ -254,9 +258,22 @@ void gamepad_state_update(uint8_t index, uint8_t hat_state,
 
 void __not_in_flash_func(core1_main()) {
   uint32_t next_update_us = time_us_32();
+  uint32_t last_blit_done = emul_blitDoneCount;
   while (1) {
     uint32_t now_us = time_us_32();
-    if ((int32_t)(now_us - next_update_us) >= 0) {
+    // Pace on the m68k's "blit finished" signal rather than free-running, so a
+    // frame is never started while the ST is still reading the buffer it would
+    // land in, and Core 1 stops drifting against the ST's VBL (D-12, D-10).
+    // The timeout is the safety net: the m68k stops signalling whenever the ST
+    // is reset or running anything but the blit loop, and a Core 1 that waited
+    // forever would be a dead display with no obvious cause.
+    uint32_t blit_done = emul_blitDoneCount;
+    bool blitted = (blit_done != last_blit_done);
+    if (blitted) {
+      __dmb();
+      last_blit_done = blit_done;
+    }
+    if (blitted || (int32_t)(now_us - next_update_us) >= 0) {
       uint32_t until_us = oric_msg_until_us;
       if (until_us != 0 && (int32_t)(until_us - now_us) > 0) {
         // oric_msg_buf is written by Core 0 and is not volatile, so without a
@@ -272,7 +289,7 @@ void __not_in_flash_func(core1_main()) {
         }
         (void)oric_screen_update(&state.oric);
       }
-      next_update_us = now_us + 19968;
+      next_update_us = now_us + ORIC_FRAME_FALLBACK_US;
     }
   }
   __builtin_unreachable();

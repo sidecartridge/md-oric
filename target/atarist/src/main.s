@@ -47,6 +47,7 @@ ROMCMD_START_ADDR:        equ (ROM4_ADDR + $F000)         ; The start address of
 CMD_KEYPRESS		   	  equ ($0BCD) 					  ; Key press
 CMD_KEYRELEASE		      equ ($0CBA) 					  ; Key release
 CMD_BOOSTER		      	  equ ($0DEF) 					  ; Booster command
+CMD_BLITDONE		      equ ($0ACE)					  ; Blit finished, RP may reuse the other buffer
 
 LISTENER_ADDR		      equ (ROM4_ADDR + $5F8)		  ; The address of the listener
 REMOTE_RESET		      equ $1					      ; The device ask to reset the
@@ -332,6 +333,7 @@ start_rom_code:
 	move.w #1, 4(a6)	; Next blit targets page B
 	move.b  #(SCREEN_A_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
 	move.b  #((SCREEN_A_BASE_ADDR >> 8) & $ff), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	tst.b (ROMCMD_START_ADDR + CMD_BLITDONE)	; Tell the RP the blit is done
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 
 .fb_b:
@@ -374,6 +376,7 @@ start_rom_code:
 	clr.w 4(a6)			; Next blit targets page A
 	move.b  #(SCREEN_B_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
 	move.b  #((SCREEN_B_BASE_ADDR >> 8) & $ff), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	tst.b (ROMCMD_START_ADDR + CMD_BLITDONE)	; Tell the RP the blit is done
 
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 

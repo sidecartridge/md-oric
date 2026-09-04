@@ -17,6 +17,10 @@
 // By default, we reset the device.
 static bool resetDeviceAtBoot = true;
 
+// Blit-finished signal from the m68k. One comparison on a path that already
+// filters every cart read; keeps the address ring free for the keyboard.
+volatile uint32_t __not_in_flash() emul_blitDoneCount = 0;
+
 // Ring buffer for DMA LSB lookup values.
 #define EMUL_ADDRLOG_CAPACITY 16
 volatile uint16_t __not_in_flash() addrlog_buf[EMUL_ADDRLOG_CAPACITY];
@@ -64,6 +68,10 @@ static void __not_in_flash_func(emul_dma_irqHandlerLookup)(void) {
     uint16_t addrLsb = dma_hw->ch[2].al3_read_addr_trig;
 
     if (addrLsb >= 0xF000) {
+      if ((addrLsb & 0xFFF) == CMD_BLITDONE) {
+        emul_blitDoneCount++;
+        continue;
+      }
       if (addrlog_count < EMUL_ADDRLOG_CAPACITY) {
         addrlog_buf[addrlog_head] = addrLsb;
         addrlog_head = (addrlog_head + 1) % EMUL_ADDRLOG_CAPACITY;
