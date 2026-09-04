@@ -199,7 +199,16 @@ static void oric_scan_files(const char* ext) {
   }
   static FILINFO info;  // ~256 bytes with LFN; static to keep it off the stack
   while (f_readdir(&dir, &info) == FR_OK && info.fname[0] != '\0') {
-    if (info.fattrib & AM_DIR) {
+    // Skip directories, and anything the filesystem marks hidden or system.
+    if (info.fattrib & (AM_DIR | AM_HID | AM_SYS)) {
+      continue;
+    }
+    // Skip dot-files too. macOS writes an AppleDouble sidecar next to every
+    // file it copies to a FAT card ("._basic.rom") and those are not always
+    // flagged hidden. Left in, they clutter the list and -- worse -- make a
+    // card holding one real ROM look like it holds two, which would suppress
+    // the single-ROM auto-install at boot.
+    if (info.fname[0] == '.') {
       continue;
     }
     if (!oric_name_has_ext(info.fname, ext)) {
