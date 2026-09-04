@@ -689,6 +689,65 @@ void oric_show_msg(oric_t* sys, const char* msg) {
   oric_ovl_present(sys);
 }
 
+// ---------------------------------------------------------------------------
+// Tape loading band. The bottom rows of the Oric screen show a progress bar
+// while a tape is playing, then "TAPE FINISHED" briefly when it ends.
+//
+// Real progress rather than an animation: it separates loading, stalled and
+// finished, which a spinner cannot. Written by Core 1 from the tape drive's
+// own position, so it costs a couple of rows out of 224 and only while the
+// motor is running.
+// ---------------------------------------------------------------------------
+#define ORIC_TAPE_BAR_ROWS 2
+#define ORIC_TAPE_MSG_ROWS 8
+
+static volatile bool oric_tape_bar_active;
+static volatile uint32_t oric_tape_bar_pos;
+static volatile uint32_t oric_tape_bar_size;
+static volatile bool oric_tape_done_msg;
+
+static void __not_in_flash_func(_oric_draw_tape_band)(oric_t* sys,
+                                                      uint16_t* restrict fb) {
+  if (oric_tape_done_msg) {
+    static const char kDone[] = "TAPE FINISHED";
+    const int len = (int)(sizeof(kDone) - 1);
+    const int start_x = (ORIC_SCREEN_WIDTH - (len * 8)) / 2;
+    for (int r = 0; r < ORIC_TAPE_MSG_ROWS; r++) {
+      const int y = ORIC_SCREEN_HEIGHT - ORIC_TAPE_MSG_ROWS + r;
+      memset(line_buff, 0, sizeof(line_buff));
+      for (int i = 0; i < len; i++) {
+        const uint8_t bits = oric_glyph_row(kDone[i], r);
+        for (int b = 0; b < 8; b++) {
+          const int x = start_x + i * 8 + b;
+          if (x >= 0 && x < ORIC_SCREEN_WIDTH && (bits & (1u << b))) {
+            line_buff[x] = 2;  // green
+          }
+        }
+      }
+      _oric_pack_line(fb + (y * ATARI_ST_FRAMEBUFFER_LINE_SIZE_16WORDS),
+                      line_buff);
+    }
+    return;
+  }
+
+  if (!oric_tape_bar_active || oric_tape_bar_size == 0) {
+    return;
+  }
+  uint32_t filled = (oric_tape_bar_pos * (uint32_t)ORIC_SCREEN_WIDTH) /
+                    oric_tape_bar_size;
+  if (filled > (uint32_t)ORIC_SCREEN_WIDTH) {
+    filled = (uint32_t)ORIC_SCREEN_WIDTH;
+  }
+  for (int x = 0; x < ORIC_SCREEN_WIDTH; x++) {
+    line_buff[x] = ((uint32_t)x < filled) ? 2u : 0u;  // green on black
+  }
+  for (int r = 0; r < ORIC_TAPE_BAR_ROWS; r++) {
+    const int y = ORIC_SCREEN_HEIGHT - ORIC_TAPE_BAR_ROWS + r;
+    _oric_pack_line(fb + (y * ATARI_ST_FRAMEBUFFER_LINE_SIZE_16WORDS),
+                    line_buff);
+  }
+}
+
 int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
   bool dirty = sys->screen_dirty;
   if (!dirty) return 0;
@@ -772,6 +831,8 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
     _oric_pack_line(dst_line, line_buff);
   }
   sys->pattr = pattr;
+
+  _oric_draw_tape_band(sys, fb);
 
   sys->fb_frame_counter = next_count;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
