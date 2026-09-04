@@ -208,29 +208,7 @@ static bool oric_name_has_ext(const char* name, const char* ext) {
 
 // Runs on Core 0 from the key handler, not from the per-frame path: it blocks
 // on the SD card, so it must not sit inside the emulation or render loops.
-// True if two filenames share a base name (differ only in extension), so a
-// converted .wav does not appear beside the .tap it came from.
-static bool oric_same_base(const char* a, const char* b) {
-  const char* da = strrchr(a, '.');
-  const char* db = strrchr(b, '.');
-  size_t la = da ? (size_t)(da - a) : strlen(a);
-  size_t lb = db ? (size_t)(db - b) : strlen(b);
-  if (la != lb) {
-    return false;
-  }
-  for (size_t i = 0; i < la; i++) {
-    char ca = a[i];
-    char cb = b[i];
-    if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
-    if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
-    if (ca != cb) {
-      return false;
-    }
-  }
-  return true;
-}
-
-static void oric_scan_files_ext(const char* ext, bool dedupe) {
+static void oric_scan_files_ext(const char* ext) {
 
   DIR dir;
   FRESULT res = f_opendir(&dir, oric_folder_name());
@@ -263,18 +241,6 @@ static void oric_scan_files_ext(const char* ext, bool dedupe) {
       oric_files_skipped++;
       continue;
     }
-    if (dedupe) {
-      bool seen = false;
-      for (int i = 0; i < oric_file_count; i++) {
-        if (oric_same_base(oric_files[i], info.fname)) {
-          seen = true;
-          break;
-        }
-      }
-      if (seen) {
-        continue;  // a .tap already covers this entry
-      }
-    }
     (void)snprintf(oric_files[oric_file_count], ORIC_NAME_MAX, "%s",
                    info.fname);
     oric_file_count++;
@@ -287,17 +253,15 @@ static void oric_scan_files_ext(const char* ext, bool dedupe) {
 static void oric_scan_files(const char* ext) {
   oric_file_count = 0;
   oric_files_skipped = 0;
-  oric_scan_files_ext(ext, false);
+  oric_scan_files_ext(ext);
 }
 
-// Tapes are .tap or .wav. Scan .tap first, then add only those .wav files with
-// no matching .tap -- the tape drive converts a .tap into a .wav beside it on
-// first use, and listing both halves of the same title twice is just confusing.
+// Tapes are .tap only. The drive plays them directly now, so nothing generates
+// .wav files and there is no second extension to merge or de-duplicate.
 static void oric_scan_tapes(void) {
   oric_file_count = 0;
   oric_files_skipped = 0;
-  oric_scan_files_ext(".tap", false);
-  oric_scan_files_ext(".wav", true);
+  oric_scan_files_ext(".tap");
 }
 
 static void oric_menu_render(oric_t* sys) {
@@ -992,6 +956,43 @@ void __not_in_flash_func(core1_main()) {
           // load writes nothing to screen RAM for seconds).
           state.oric.screen_dirty = true;
         }
+        // Tape loading band. The Oric writes nothing to screen RAM during a
+        // load, so nothing would repaint on its own -- force a redraw, but
+        // only when the bar would actually move, so a load does not cost a
+        // full conversion every frame.
+        static uint32_t bar_last_filled = 0xFFFFFFFFu;
+        static uint32_t tape_done_until_us;
+        uint32_t tpos = 0;
+        uint32_t tsize = 0;
+        if (oric_td_progress(&state.oric.td, &tpos, &tsize) &&
+            oric_td_is_motor_on(&state.oric.td) && tpos < tsize) {
+          oric_tape_bar_pos = tpos;
+          oric_tape_bar_size = tsize;
+          oric_tape_bar_active = true;
+          oric_tape_done_msg = false;
+          const uint32_t filled =
+              (tpos * (uint32_t)ORIC_SCREEN_WIDTH) / tsize;
+          if (filled != bar_last_filled) {
+            bar_last_filled = filled;
+            state.oric.screen_dirty = true;
+          }
+        } else if (oric_tape_bar_active) {
+          oric_tape_bar_active = false;
+          bar_last_filled = 0xFFFFFFFFu;
+          // Only call it finished if the tape actually ran out. A motor stop
+          // part-way through is a pause or an eject, not a completed load, and
+          // saying "finished" there would be a lie.
+          if (tsize != 0 && tpos >= tsize) {
+            oric_tape_done_msg = true;
+            tape_done_until_us = now_us + 2000000u;
+          }
+          state.oric.screen_dirty = true;
+        } else if (oric_tape_done_msg &&
+                   (int32_t)(tape_done_until_us - now_us) <= 0) {
+          oric_tape_done_msg = false;
+          state.oric.screen_dirty = true;  // repaint to clear the band
+        }
+
         uint32_t cvt_t0 = time_us_32();
         if (oric_screen_update(&state.oric)) {
           uint32_t dt = time_us_32() - cvt_t0;
