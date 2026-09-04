@@ -136,6 +136,11 @@ void kbdmap_initOric(void) {
   kbdmap_st_gsx_to_ascii[0x62][0] = 0x145;
   kbdmap_st_gsx_to_ascii[0x62][1] = 0x145;
 
+  // ST HOME: conversion-timing readout (EPIC-03 STORY-01). Unmapped before,
+  // and 0x146/0x147 are ORIC_KEY_CTRL/SHIFT, so the debug keycode is 0x148.
+  kbdmap_st_gsx_to_ascii[0x47][0] = 0x148;
+  kbdmap_st_gsx_to_ascii[0x47][1] = 0x148;
+
   // Map arrow keys.
   kbdmap_st_gsx_to_ascii[0x4B][0] = 0x150;  // LEFT
   kbdmap_st_gsx_to_ascii[0x4B][1] = 0x150;
