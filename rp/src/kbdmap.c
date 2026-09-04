@@ -123,12 +123,11 @@ uint16_t __not_in_flash_func(kbdmap_StGsx2Ascii)(uint16_t scan_code,
 }
 
 void kbdmap_initOric(void) {
-  // Map F1..F10 to Oric keycodes 0x13A..0x143 in both lower/upper slots.
-  for (uint16_t i = 0; i < 10; i++) {
-    uint16_t keycode = (uint16_t)(0x13A + i);
-    kbdmap_st_gsx_to_ascii[0x3B + i][0] = keycode;
-    kbdmap_st_gsx_to_ascii[0x3B + i][1] = keycode;
-  }
+  // F1 only: it opens and closes the on-screen menu (D-16). F2..F10 are left
+  // unmapped so they reach the Oric as nothing -- it has no function keys --
+  // now that loading goes through the menu instead of F-key-by-index.
+  kbdmap_st_gsx_to_ascii[0x3B][0] = 0x13A;
+  kbdmap_st_gsx_to_ascii[0x3B][1] = 0x13A;
 
   // Map UNDO (0x61) and HELP (0x62).
   kbdmap_st_gsx_to_ascii[0x61][0] = 0x144;

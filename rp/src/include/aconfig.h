@@ -15,6 +15,7 @@
 
 #define ACONFIG_PARAM_FOLDER "FOLDER"
 #define ACONFIG_PARAM_MODE "MODE"
+#define ACONFIG_PARAM_ROM "ROM"  // selected ROM filename, empty = ask at boot
 
 #define ACONFIG_SUCCESS 0
 #define ACONFIG_INIT_ERROR -1

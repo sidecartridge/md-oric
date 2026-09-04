@@ -56,6 +56,7 @@
 #include "hardware/structs/ssi.h"
 #include "hardware/sync.h"
 #include "hardware/vreg.h"
+#include "hardware/watchdog.h"
 #include "font8x8.h"
 #include "kbdmap.h"
 #include "oric.h"
@@ -87,6 +88,451 @@ uint16_t oric_via_queue_head;
 static volatile uint32_t oric_msg_until_us;
 static char oric_msg_buf[32];
 
+// ---------------------------------------------------------------------------
+// On-screen menu. Dispatcher shape follows md-gpu-demo's demo_menu.c: one key
+// owned for entering/leaving, everything else forwarded to whatever is active.
+// Here the owned key is F1 rather than ESC -- ESC is a real Oric key, whereas
+// the Oric has no function keys, so F1 is free (D-15, D-16).
+//
+// State is written on Core 0 (the key handler) and read on Core 1 (the
+// renderer), so it follows D-13: writer fills the payload, __dmb(), then
+// raises the flag; reader tests the flag, __dmb(), then reads the payload.
+// ---------------------------------------------------------------------------
+enum { ORIC_UI_EMULATING = 0, ORIC_UI_MENU = 1, ORIC_UI_ROMLIST = 2 };
+
+// File list. FatFs is built with long filenames (FF_MAX_LFN 255), but storing
+// 255 bytes per entry would not fit the RAM budget, and the overlay is only 30
+// columns wide anyway. Cap the stored name and count what is skipped rather
+// than dropping it silently -- a user whose ROM does not appear deserves to
+// know why.
+#define ORIC_FILES_MAX 128
+#define ORIC_NAME_MAX 48
+#define ORIC_LIST_ROWS 18
+#define ORIC_LIST_TOP 5
+
+// Long enough to read, and long enough for the m68k to blit the final black
+// frame at 50 Hz before the RP stops answering the cartridge bus.
+#define ORIC_REBOOT_MSG_MS 800u
+#define ORIC_BLACK_FRAME_MS 120u
+
+static char oric_files[ORIC_FILES_MAX][ORIC_NAME_MAX]
+    __attribute__((section(".oric_ram")));
+static int oric_file_count;
+static int oric_files_skipped;
+static volatile uint16_t oric_list_sel;
+
+static int load_oric_rom_from_sd(const char *romName);
+
+// True once a ROM is actually loaded. Until then Core 0 must not tick the
+// 6502 -- oric_rom is zeroed and the CPU would execute garbage.
+static volatile bool oric_have_rom = false;
+
+// Core 1 pause handshake. Saving the ROM choice writes flash from Core 0, and
+// with PICO_FLASH_ASSUME_CORE0_SAFE=1 the SDK does not lock Core 1 out. The
+// render path calls snprintf, which lives in flash, so Core 1 must be parked
+// in RAM-resident code before the write.
+static volatile bool oric_c1_pause_req = false;
+static volatile bool oric_c1_paused = false;
+
+static void oric_core1_pause(void) {
+  oric_c1_pause_req = true;
+  while (!oric_c1_paused) {
+    tight_loop_contents();
+  }
+  __dmb();
+}
+
+static void oric_core1_resume(void) {
+  __dmb();
+  oric_c1_pause_req = false;
+}
+
+#define ORIC_MENU_ITEMS 5
+static const char* const oric_menu_items[ORIC_MENU_ITEMS] = {
+    "SELECT ROM", "SELECT TAPE", "EJECT TAPE", "STATUS", "RESUME"};
+
+static volatile uint8_t oric_ui_state = ORIC_UI_EMULATING;
+static volatile bool oric_ui_redraw = false;
+static volatile uint8_t oric_menu_sel = 0;
+
+#define ORIC_ATTR_NORMAL ORIC_OVL_ATTR(7, 0)  /* white on black */
+#define ORIC_ATTR_DIM ORIC_OVL_ATTR(6, 0)     /* cyan on black */
+#define ORIC_ATTR_HILITE ORIC_OVL_ATTR(0, 3)  /* black on yellow */
+
+static const char* oric_folder_name(void) {
+  SettingsConfigEntry* folder =
+      settings_find_entry(aconfig_getContext(), ACONFIG_PARAM_FOLDER);
+  return folder ? folder->value : "/oric";
+}
+
+// Case-insensitive suffix test.
+static bool oric_name_has_ext(const char* name, const char* ext) {
+  size_t n = strlen(name);
+  size_t e = strlen(ext);
+  if (n <= e) {
+    return false;
+  }
+  const char* tail = name + (n - e);
+  for (size_t i = 0; i < e; i++) {
+    char a = tail[i];
+    char b = ext[i];
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+    if (a != b) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Runs on Core 0 from the key handler, not from the per-frame path: it blocks
+// on the SD card, so it must not sit inside the emulation or render loops.
+static void oric_scan_files(const char* ext) {
+  oric_file_count = 0;
+  oric_files_skipped = 0;
+
+  DIR dir;
+  FRESULT res = f_opendir(&dir, oric_folder_name());
+  if (res != FR_OK) {
+    DPRINTF("oric: opendir %s failed (%d)\n", oric_folder_name(), (int)res);
+    return;
+  }
+  static FILINFO info;  // ~256 bytes with LFN; static to keep it off the stack
+  while (f_readdir(&dir, &info) == FR_OK && info.fname[0] != '\0') {
+    // Skip directories, and anything the filesystem marks hidden or system.
+    if (info.fattrib & (AM_DIR | AM_HID | AM_SYS)) {
+      continue;
+    }
+    // Skip dot-files too. macOS writes an AppleDouble sidecar next to every
+    // file it copies to a FAT card ("._basic.rom") and those are not always
+    // flagged hidden. Left in, they clutter the list and -- worse -- make a
+    // card holding one real ROM look like it holds two, which would suppress
+    // the single-ROM auto-install at boot.
+    if (info.fname[0] == '.') {
+      continue;
+    }
+    if (!oric_name_has_ext(info.fname, ext)) {
+      continue;
+    }
+    if (strlen(info.fname) >= ORIC_NAME_MAX) {
+      oric_files_skipped++;
+      continue;
+    }
+    if (oric_file_count >= ORIC_FILES_MAX) {
+      oric_files_skipped++;
+      continue;
+    }
+    (void)snprintf(oric_files[oric_file_count], ORIC_NAME_MAX, "%s",
+                   info.fname);
+    oric_file_count++;
+  }
+  f_closedir(&dir);
+  DPRINTF("oric: %d '%s' files, %d skipped\n", oric_file_count, ext,
+          oric_files_skipped);
+}
+
+static void oric_menu_render(oric_t* sys) {
+  oric_ovl_clear(ORIC_ATTR_NORMAL);
+  oric_ovl_text(8, 2, "ORIC EMULATOR", ORIC_ATTR_NORMAL);
+  oric_ovl_text(8, 3, "-------------", ORIC_ATTR_DIM);
+
+  const uint8_t sel = oric_menu_sel;
+  for (int i = 0; i < ORIC_MENU_ITEMS; i++) {
+    const int row = 7 + i * 2;
+    const uint8_t attr = (i == sel) ? ORIC_ATTR_HILITE : ORIC_ATTR_NORMAL;
+    // Highlight the whole bar, not just the text, so the selection reads
+    // clearly at 8x8 -- the cell attribute does the job a filled rect does
+    // in md-gpu-demo.
+    oric_ovl_fill(4, row, 22, attr);
+    oric_ovl_text(6, row, oric_menu_items[i], attr);
+  }
+
+  SettingsConfigEntry* romEntry =
+      settings_find_entry(aconfig_getContext(), ACONFIG_PARAM_ROM);
+  const char* romName =
+      (romEntry && romEntry->value[0] != '\0') ? romEntry->value : "(none)";
+  char line[ORIC_OVL_COLS + 1];
+  (void)snprintf(line, sizeof(line), "ROM: %s", romName);
+  oric_ovl_text(2, 20, line, ORIC_ATTR_DIM);
+
+  oric_ovl_text(2, 24, "UP/DN  RET=SELECT", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 25, "F1=CLOSE", ORIC_ATTR_DIM);
+  oric_ovl_present(sys);
+}
+
+static void oric_romlist_render(oric_t* sys) {
+  oric_ovl_clear(ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 2, "SELECT ROM", ORIC_ATTR_NORMAL);
+
+  if (oric_file_count == 0) {
+    // Reachable now that nothing is embedded (D-07 superseded), so it has to
+    // say what to do rather than being an empty box.
+    oric_ovl_text(1, 6, "No BASIC ROM file found in", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 7, oric_folder_name(), ORIC_ATTR_DIM);
+    oric_ovl_text(1, 9, "Copy at least one .rom", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 10, "file there, then reopen", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 11, "this menu.", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 13, "Please read the", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 14, "microfirmware documentation", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 15, "to find one:", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 17, "docs.sidecartridge.com", ORIC_ATTR_DIM);
+    oric_ovl_text(1, 25, "F1=BACK", ORIC_ATTR_DIM);
+    oric_ovl_present(sys);
+    return;
+  }
+
+  const int sel = (int)oric_list_sel;
+  const int page = sel / ORIC_LIST_ROWS;
+  const int first = page * ORIC_LIST_ROWS;
+  const int pages = (oric_file_count + ORIC_LIST_ROWS - 1) / ORIC_LIST_ROWS;
+
+  char hdr[ORIC_OVL_COLS + 1];
+  (void)snprintf(hdr, sizeof(hdr), "%d FILES  PAGE %d/%d", oric_file_count,
+                 page + 1, pages);
+  oric_ovl_text(2, 3, hdr, ORIC_ATTR_DIM);
+
+  for (int r = 0; r < ORIC_LIST_ROWS; r++) {
+    const int idx = first + r;
+    if (idx >= oric_file_count) {
+      break;
+    }
+    const int row = ORIC_LIST_TOP + r;
+    const uint8_t attr = (idx == sel) ? ORIC_ATTR_HILITE : ORIC_ATTR_NORMAL;
+    oric_ovl_fill(1, row, ORIC_OVL_COLS - 2, attr);
+    // oric_ovl_text clips at the right edge, so a long name simply truncates.
+    oric_ovl_text(2, row, oric_files[idx], attr);
+  }
+
+  if (oric_files_skipped > 0) {
+    char skip[ORIC_OVL_COLS + 1];
+    (void)snprintf(skip, sizeof(skip), "%d SKIPPED (NAME TOO LONG)",
+                   oric_files_skipped);
+    oric_ovl_text(2, 23, skip, ORIC_ATTR_DIM);
+  }
+  oric_ovl_text(2, 25, "UP/DN  L/R=PAGE  F1=BACK", ORIC_ATTR_DIM);
+  oric_ovl_present(sys);
+}
+
+static void oric_ui_repaint(void) {
+  __dmb();
+  oric_ui_redraw = true;
+}
+
+static void oric_romlist_open(void) {
+  oric_scan_files(".rom");
+  oric_list_sel = 0;
+  oric_ui_repaint();
+  oric_ui_state = ORIC_UI_ROMLIST;
+}
+
+// Copy the chosen ROM over rom.img, which is what the emulator loads at boot.
+static bool oric_copy_to_default_rom(const char* name) {
+  const char* folder = oric_folder_name();
+  size_t flen = strlen(folder);
+  const char* sep = (flen > 0 && folder[flen - 1] == '/') ? "" : "/";
+  char src[256];
+  char dst[256];
+  if (snprintf(src, sizeof(src), "%s%s%s", folder, sep, name) <= 0 ||
+      snprintf(dst, sizeof(dst), "%s%srom.img", folder, sep) <= 0) {
+    return false;
+  }
+
+  FIL fs;
+  FIL fd;
+  if (f_open(&fs, src, FA_READ) != FR_OK) {
+    DPRINTF("oric: cannot open %s\n", src);
+    return false;
+  }
+  if (f_open(&fd, dst, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) {
+    DPRINTF("oric: cannot create %s\n", dst);
+    f_close(&fs);
+    return false;
+  }
+
+  static uint8_t copy_buf[1024];
+  bool ok = true;
+  for (;;) {
+    UINT br = 0;
+    if (f_read(&fs, copy_buf, sizeof(copy_buf), &br) != FR_OK) {
+      ok = false;
+      break;
+    }
+    if (br == 0) {
+      break;
+    }
+    UINT bw = 0;
+    if (f_write(&fd, copy_buf, br, &bw) != FR_OK || bw != br) {
+      ok = false;
+      break;
+    }
+  }
+  f_close(&fd);
+  f_close(&fs);
+  DPRINTF("oric: copied %s -> %s (%s)\n", src, dst, ok ? "ok" : "FAILED");
+  return ok;
+}
+
+// Copy the choice over rom.img and reboot. Rebooting rather than swapping the
+// ROM under a running 6502 means the emulator reinitialises from a clean state,
+// with no half-reset CPU, tape drive or VIA to reason about.
+// Reject a file that cannot be an Oric ROM before it overwrites rom.img.
+// Without this the copy succeeds, the reboot fails to load, and the user lands
+// back on the picker with nothing explaining why.
+static bool oric_rom_size_ok(const char* name, uint32_t* out_size) {
+  const char* folder = oric_folder_name();
+  size_t flen = strlen(folder);
+  const char* sep = (flen > 0 && folder[flen - 1] == '/') ? "" : "/";
+  char path[256];
+  if (snprintf(path, sizeof(path), "%s%s%s", folder, sep, name) <= 0) {
+    return false;
+  }
+  FILINFO info;
+  if (f_stat(path, &info) != FR_OK) {
+    return false;
+  }
+  *out_size = (uint32_t)info.fsize;
+  return info.fsize >= (FSIZE_t)ORIC_ROM_SIZE;
+}
+
+static void oric_select_rom(oric_t* sys, const char* name) {
+  // Park Core 1 for the whole sequence. It must not publish frames over the
+  // screens painted below, and settings_save writes flash while
+  // PICO_FLASH_ASSUME_CORE0_SAFE=1 leaves Core 1 unlocked.
+  oric_core1_pause();
+
+  uint32_t size = 0;
+  if (!oric_rom_size_ok(name, &size)) {
+    char msg[ORIC_OVL_COLS + 1];
+    (void)snprintf(msg, sizeof(msg), "%s is %lu bytes", name,
+                   (unsigned long)size);
+    oric_ovl_clear(ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 8, "Not a valid Oric ROM.", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 10, msg, ORIC_ATTR_DIM);
+    oric_ovl_text(1, 12, "A BASIC ROM is 16384 bytes", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 13, "(16 KB).", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 25, "F1=BACK", ORIC_ATTR_DIM);
+    oric_ovl_present(sys);
+    oric_core1_resume();
+    return;  // rom.img is left untouched
+  }
+
+  oric_ovl_clear(ORIC_ATTR_NORMAL);
+  oric_ovl_text(1, 10, "Installing ROM...", ORIC_ATTR_NORMAL);
+  oric_ovl_present(sys);
+
+  if (!oric_copy_to_default_rom(name)) {
+    char msg[ORIC_OVL_COLS + 1];
+    (void)snprintf(msg, sizeof(msg), "Cannot copy %s", name);
+    oric_ovl_clear(ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 8, msg, ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 10, "Check the card is writable.", ORIC_ATTR_DIM);
+    oric_ovl_text(1, 25, "F1=BACK", ORIC_ATTR_DIM);
+    oric_ovl_present(sys);
+    oric_core1_resume();
+    return;  // stay on the list rather than dead-ending
+  }
+
+  // Remember which file it came from, so the menu can show it after the
+  // reboot. Core 1 is already parked; it is never resumed from here.
+  (void)settings_put_string(aconfig_getContext(), ACONFIG_PARAM_ROM, name);
+  (void)settings_save(aconfig_getContext(), true);
+
+  oric_ovl_clear(ORIC_ATTR_NORMAL);
+  oric_ovl_text(1, 10, "Rebooting...", ORIC_ATTR_NORMAL);
+  oric_ovl_present(sys);
+  sleep_ms(ORIC_REBOOT_MSG_MS);
+
+  // Leave the screen black before resetting. Once the RP reboots the frame
+  // counter stops changing, so the m68k never blits again and the ST holds
+  // whatever was last on screen -- indefinitely. If the chosen ROM turns out
+  // to be broken, a frozen menu would look live and mislead; black does not.
+  oric_ovl_clear(ORIC_OVL_ATTR(0, 0));
+  oric_ovl_present(sys);
+  // The m68k only picks this up on its next VBL, so give it time to actually
+  // blit the black frame before the bus goes away.
+  sleep_ms(ORIC_BLACK_FRAME_MS);
+
+  watchdog_reboot(0, 0, RESET_WATCHDOG_TIMEOUT);
+  while (1) {
+    tight_loop_contents();
+  }
+}
+
+static bool oric_romlist_key(oric_t* sys, int code) {
+  (void)sys;
+  if (oric_file_count == 0) {
+    return true;  // only F1 gets out, and that is handled before we are called
+  }
+  const int n = oric_file_count;
+  int sel = (int)oric_list_sel;
+  switch (code) {
+    // Clamp rather than wrap: on a long list, rolling from the last entry back
+    // to the first loses your place and reads as a glitch.
+    case 0x152:  // UP
+      sel = (sel > 0) ? sel - 1 : 0;
+      break;
+    case 0x151:  // DOWN
+      sel = (sel < n - 1) ? sel + 1 : n - 1;
+      break;
+    case 0x150:  // LEFT: previous page
+      sel = (sel >= ORIC_LIST_ROWS) ? sel - ORIC_LIST_ROWS : 0;
+      break;
+    case 0x14F:  // RIGHT: next page
+      sel = (sel + ORIC_LIST_ROWS < n) ? sel + ORIC_LIST_ROWS : n - 1;
+      break;
+    case '\r':
+      oric_select_rom(sys, oric_files[sel]);
+      return true;
+    default:
+      return true;
+  }
+  oric_list_sel = (uint16_t)sel;
+  oric_ui_repaint();
+  return true;
+}
+
+static void oric_menu_open(void) {
+  oric_menu_sel = 0;
+  oric_ui_repaint();
+  oric_ui_state = ORIC_UI_MENU;
+}
+
+static void oric_menu_close(oric_t* sys) {
+  oric_ui_state = ORIC_UI_EMULATING;
+  // Force a full repaint of the Oric screen: the menu overwrote the
+  // framebuffer, and oric_screen_update only renders when something is dirty.
+  sys->screen_dirty = true;
+}
+
+// Returns true if the key was consumed by the menu.
+static bool oric_menu_key(oric_t* sys, int code) {
+  switch (code) {
+    case 0x152:  // UP
+      oric_menu_sel =
+          (uint8_t)((oric_menu_sel + ORIC_MENU_ITEMS - 1) % ORIC_MENU_ITEMS);
+      oric_ui_repaint();
+      return true;
+    case 0x151:  // DOWN
+      oric_menu_sel = (uint8_t)((oric_menu_sel + 1) % ORIC_MENU_ITEMS);
+      oric_ui_repaint();
+      return true;
+    case '\r':  // RETURN
+      switch (oric_menu_sel) {
+        case 0:
+          oric_romlist_open();
+          break;
+        case ORIC_MENU_ITEMS - 1:
+          oric_menu_close(sys);
+          break;
+        default:
+          break;  // tape, eject and status arrive in EPIC-05
+      }
+      return true;
+    default:
+      return true;  // menu owns the keyboard while it is open
+  }
+}
+
 // EPIC-03 STORY-01: cost of oric_screen_update, sampled on Core 1 and read on
 // Core 0 when the stats key is pressed. Scalars, so volatile is enough to stop
 // the compiler caching them across the loop (D-13); the barrier before reading
@@ -109,15 +555,6 @@ static volatile uint32_t oric_cvt_count = 0;
 static void oric_publish_msg(void) {
   __dmb();
   oric_msg_until_us = time_us_32() + (ORIC_MSG_DISPLAY_SECONDS * 1000u * 1000u);
-}
-
-static void oric_set_loading_msg(uint8_t fkey) {
-  if (fkey < 1 || fkey > 10) {
-    return;
-  }
-  (void)snprintf(oric_msg_buf, sizeof(oric_msg_buf), "Loading F%u file...",
-                 (unsigned)fkey);
-  oric_publish_msg();
 }
 
 // Show min / mean / max microseconds per conversion, then start a fresh
@@ -184,17 +621,19 @@ void app_init(void) {
   oric_init(&state.oric, &desc);
 }
 
-static int load_oric_rom_from_sd(void) {
-  SettingsConfigEntry *folder =
-      settings_find_entry(aconfig_getContext(), ACONFIG_PARAM_FOLDER);
-  const char *folderName = folder ? folder->value : "/oric";
+static int load_oric_rom_from_sd(const char *romName) {
+  if (!romName || romName[0] == '\0') {
+    return ORIC_ROM_LOAD_ERR_PATH;
+  }
+  const char *folderName = oric_folder_name();
   char path[256];
   size_t name_len = strlen(folderName);
   const char *sep =
       (name_len > 0 && folderName[name_len - 1] == '/') ? "" : "/";
-  int path_len = snprintf(path, sizeof(path), "%s%srom.img", folderName, sep);
+  int path_len =
+      snprintf(path, sizeof(path), "%s%s%s", folderName, sep, romName);
   if (path_len <= 0 || (size_t)path_len >= sizeof(path)) {
-    DPRINTF("rom.img path too long\n");
+    DPRINTF("oric: rom path too long\n");
     return ORIC_ROM_LOAD_ERR_PATH;
   }
 
@@ -231,38 +670,34 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
 
   oric_t *sys = &state.oric;
 
-  switch (code) {
-    case 0x13A:  // F1
-    case 0x13B:  // F2
-    case 0x13C:  // F3
-    case 0x13D:  // F4
-    case 0x13E:  // F5
-    case 0x13F:  // F6
-    case 0x140:  // F7
-    case 0x141:  // F8
-    case 0x142:  // F9
-    case 0x143:  // F10
-    {
-      uint8_t index = code - 0x13A;
-      oric_set_loading_msg((uint8_t)(index + 1));
-      int num_nib_images = CHIPS_ARRAY_SIZE(oric_nib_images);
-      if (index < num_nib_images) {
-        if (sys->fdc.valid) {
-          disk2_fdd_insert_disk(&sys->fdc.fdd[0], oric_nib_images[index]);
-        }
-      } else {
-        index -= num_nib_images;
-        if (sys->td.valid) {
-          bool inserted = oric_td_insert_tape_sdcard(&sys->td, index);
-          if (!inserted) {
-            DPRINTF("oric: failed to insert tape image %d\n", index);
-          } else {
-            DPRINTF("oric: tape image %d inserted\n", index);
-          }
-        }
-      }
-      break;
+  // F1 owns the UI: it steps back one level, and opens the menu from the
+  // emulator.
+  if (code == 0x13A) {
+    switch (oric_ui_state) {
+      case ORIC_UI_ROMLIST:
+        oric_ui_state = ORIC_UI_MENU;
+        oric_ui_repaint();
+        break;
+      case ORIC_UI_MENU:
+        oric_menu_close(sys);
+        break;
+      default:
+        oric_menu_open();
+        break;
     }
+    return;
+  }
+  // Any UI screen consumes everything; nothing reaches the Oric.
+  if (oric_ui_state == ORIC_UI_MENU) {
+    (void)oric_menu_key(sys, code);
+    return;
+  }
+  if (oric_ui_state == ORIC_UI_ROMLIST) {
+    (void)oric_romlist_key(sys, code);
+    return;
+  }
+
+  switch (code) {
 
     case 0x148:  // ST HOME: show conversion timing, then reset the window
       oric_show_cvt_stats();
@@ -290,6 +725,11 @@ void __not_in_flash_func(kbd_raw_key_up)(int code) {
       code = toupper(code);
     }
   }
+  // Swallow releases while the menu is open, and the F1 release always --
+  // otherwise the Oric sees a release for a press it never got.
+  if (oric_ui_state != ORIC_UI_EMULATING || code == 0x13A) {
+    return;
+  }
   kbd_key_up(&state.oric.kbd, code);
 }
 
@@ -300,6 +740,14 @@ void __not_in_flash_func(core1_main()) {
   uint32_t next_update_us = time_us_32();
   uint32_t last_blit_done = emul_blitDoneCount;
   while (1) {
+    if (oric_c1_pause_req) {
+      oric_c1_paused = true;
+      while (oric_c1_pause_req) {
+        tight_loop_contents();
+      }
+      oric_c1_paused = false;
+      continue;
+    }
     uint32_t now_us = time_us_32();
     // Pace on the m68k's "blit finished" signal rather than free-running, so a
     // frame is never started while the ST is still reading the buffer it would
@@ -314,6 +762,19 @@ void __not_in_flash_func(core1_main()) {
       last_blit_done = blit_done;
     }
     if (blitted || (int32_t)(now_us - next_update_us) >= 0) {
+      if (oric_ui_state != ORIC_UI_EMULATING) {
+        if (oric_ui_redraw) {
+          oric_ui_redraw = false;
+          __dmb();
+          if (oric_ui_state == ORIC_UI_ROMLIST) {
+            oric_romlist_render(&state.oric);
+          } else {
+            oric_menu_render(&state.oric);
+          }
+        }
+        next_update_us = now_us + 19968;
+        continue;
+      }
       uint32_t until_us = oric_msg_until_us;
       if (until_us != 0 && (int32_t)(until_us - now_us) > 0) {
         // oric_msg_buf is written by Core 0 and is not volatile, so without a
@@ -345,7 +806,7 @@ void __not_in_flash_func(core1_main()) {
 int __not_in_flash_func(oric_main)() {
   // Erase the ROM area in RAM
   memset((void *)&__oric_rom_in_ram_start__, 0, 32 * 1024 * sizeof(uint8_t));
-  int rom_load_result = load_oric_rom_from_sd();
+  int rom_load_result = load_oric_rom_from_sd("rom.img");
 
   // SAFEGUARD START: Init translation table for Oric
   kbdmap_initOric();
@@ -387,15 +848,33 @@ int __not_in_flash_func(oric_main)() {
 #endif
   DPRINTF("Changed to %u kHz: %s\n", khz_speed, changed_khz ? "yes" : "no");
 
-  if (rom_load_result != ORIC_ROM_LOAD_OK) {
-    DPRINTF("rom.img load error: %d\n", rom_load_result);
-    oric_show_msg(&state.oric, "NO ROM FOUND");
-    while (1) {
-      // Re-render rather than bump the counter: with two buffers a bare
-      // increment would point the ST at the buffer the message is not in.
-      oric_show_msg(&state.oric, "NO ROM FOUND");
-      sleep_ms(1000);
+  if (rom_load_result == ORIC_ROM_LOAD_OK) {
+    oric_have_rom = true;
+  } else {
+    // No ROM installed yet, or the installed one is unreadable.
+    DPRINTF("oric: rom.img load error %d\n", rom_load_result);
+    oric_scan_files(".rom");
+    if (oric_file_count == 1) {
+      // Exactly one candidate: install it without making the user choose from
+      // a list of one. Announce it first so it is visible rather than silent
+      // -- oric_select_rom copies over rom.img and reboots, so the message is
+      // the only trace the user would otherwise get.
+      char msg[ORIC_OVL_COLS + 1];
+      (void)snprintf(msg, sizeof(msg), "Installing %s", oric_files[0]);
+      oric_ovl_clear(ORIC_ATTR_NORMAL);
+      oric_ovl_text(1, 10, msg, ORIC_ATTR_NORMAL);
+      oric_ovl_text(1, 12, "Only ROM found on the card.", ORIC_ATTR_DIM);
+      oric_ovl_present(&state.oric);
+      sleep_ms(1500);
+      oric_select_rom(&state.oric, oric_files[0]);
+      // oric_select_rom reboots on success; reaching here means the copy
+      // failed and it has already painted the reason, so fall through to the
+      // list rather than rebooting into the same failure.
     }
+    // Zero ROMs, several ROMs, or a failed auto-install: let the user pick.
+    oric_ui_state = ORIC_UI_ROMLIST;
+    oric_list_sel = 0;
+    oric_ui_repaint();
   }
 
   DPRINTF("Core 1 start\n");
@@ -405,8 +884,10 @@ int __not_in_flash_func(oric_main)() {
   while (1) {
     uint32_t start_time_in_micros = time_us_32();
 
-    for (uint32_t ticks = 0; ticks < num_ticks; ticks++) {
-      oric_tick(&state.oric);
+    if (oric_have_rom) {
+      for (uint32_t ticks = 0; ticks < num_ticks; ticks++) {
+        oric_tick(&state.oric);
+      }
     }
 
     static bool shift_pressed = false;

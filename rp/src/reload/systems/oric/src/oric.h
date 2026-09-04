@@ -212,6 +212,25 @@ bool oric_load_snapshot(oric_t* sys, uint32_t version, oric_t* src);
 
 int __not_in_flash_func(oric_screen_update)(oric_t* sys);
 void oric_show_msg(oric_t* sys, const char* msg);
+
+// Character-cell overlay. The Oric screen is 240x224 and font8x8 is an 8x8
+// cell, so the overlay is exactly 30 columns x 28 rows. Cells rather than a
+// byte-per-pixel buffer because every menu screen is text on a grid: 30x28
+// costs 1680 bytes against the 53760 a full chunked buffer would need, which
+// does not fit the RAM budget.
+//
+// Draw with clear/text/fill, then present() once -- it renders the cells into
+// the framebuffer and publishes the frame. Nothing is drawn per emulator frame:
+// the ST keeps showing the last published frame until the counter moves, so a
+// static menu costs nothing.
+#define ORIC_OVL_COLS 30
+#define ORIC_OVL_ROWS 28
+#define ORIC_OVL_ATTR(fg, bg) ((uint8_t)(((fg) & 7u) | (((bg) & 7u) << 4)))
+
+void oric_ovl_clear(uint8_t attr);
+void oric_ovl_text(int col, int row, const char* str, uint8_t attr);
+void oric_ovl_fill(int col, int row, int ncols, uint8_t attr);
+void oric_ovl_present(oric_t* sys);
 void oric_ayQueuePush(uint16_t* queue, uint16_t* head, uint16_t value);
 
 #ifdef __cplusplus
@@ -573,50 +592,71 @@ static inline void __not_in_flash_func(_oric_pack_line)(
   }
 }
 
-void oric_show_msg(oric_t* sys, const char* msg) {
-  CHIPS_ASSERT(sys && sys->valid);
-  if (!msg || *msg == '\0') {
+// Cell storage: one character byte and one attribute byte per cell.
+// Attribute packs fg in bits 0-2 and bg in bits 4-6 (Oric palette is 0-7).
+static uint8_t ovl_ch[ORIC_OVL_COLS * ORIC_OVL_ROWS]
+    __attribute__((section(".oric_ram")));
+static uint8_t ovl_at[ORIC_OVL_COLS * ORIC_OVL_ROWS]
+    __attribute__((section(".oric_ram")));
+
+void oric_ovl_clear(uint8_t attr) {
+  memset(ovl_ch, ' ', sizeof(ovl_ch));
+  memset(ovl_at, attr, sizeof(ovl_at));
+}
+
+void oric_ovl_text(int col, int row, const char* str, uint8_t attr) {
+  if (!str || row < 0 || row >= ORIC_OVL_ROWS) {
     return;
   }
+  for (int c = col; *str; str++, c++) {
+    if (c < 0) {
+      continue;
+    }
+    if (c >= ORIC_OVL_COLS) {
+      break;
+    }
+    ovl_ch[row * ORIC_OVL_COLS + c] = (uint8_t)*str;
+    ovl_at[row * ORIC_OVL_COLS + c] = attr;
+  }
+}
+
+// Recolour a run of cells without touching their characters -- the selection
+// highlight bar in md-gpu-demo's menu, done with attributes instead of a rect.
+void oric_ovl_fill(int col, int row, int ncols, uint8_t attr) {
+  if (row < 0 || row >= ORIC_OVL_ROWS) {
+    return;
+  }
+  for (int c = col; c < col + ncols; c++) {
+    if (c < 0 || c >= ORIC_OVL_COLS) {
+      continue;
+    }
+    ovl_at[row * ORIC_OVL_COLS + c] = attr;
+  }
+}
+
+void __not_in_flash_func(oric_ovl_present)(oric_t* sys) {
+  CHIPS_ASSERT(sys && sys->valid);
   uint16_t next_count = (uint16_t)(sys->fb_frame_counter + 1u);
   uint16_t* restrict fb = _oric_fb_for_count(next_count);
   sys->fb = fb;
-  memset(fb, 0, ATARI_ST_FRAMEBUFFER_SIZE_16WORDS * sizeof(uint16_t));
 
-  const int glyph_w = font8x8.w;
-  const int glyph_h = font8x8.h;
-  const uint8_t fg = 0x07;
-  const int len = (int)strlen(msg);
-  int start_x = (ORIC_SCREEN_WIDTH - (len * glyph_w)) / 2;
-  int start_y = (ORIC_SCREEN_HEIGHT - glyph_h) / 2;
-  if (start_x < 0) start_x = 0;
-  if (start_y < 0) start_y = 0;
-
-  for (int y = 0; y < glyph_h; y++) {
-    int screen_y = start_y + y;
-    if (screen_y >= ORIC_SCREEN_HEIGHT) {
-      break;
-    }
-    memset(line_buff, 0, sizeof(line_buff));
-
-    for (int i = 0; i < len; i++) {
-      uint8_t row_bits = oric_glyph_row(msg[i], y);
-      int base_x = start_x + (i * glyph_w);
-      for (int bit = 0; bit < glyph_w; bit++) {
-        // font8x8 is LSB-left: bit 0 is the leftmost pixel of the row.
-        if (row_bits & (1u << bit)) {
-          int x = base_x + bit;
-          if (x < 0 || x >= ORIC_SCREEN_WIDTH) {
-            continue;
-          }
-          line_buff[x] = fg;
-        }
+  for (int py = 0; py < ORIC_SCREEN_HEIGHT; py++) {
+    const int crow = py >> 3;
+    const int grow = py & 7;
+    const uint8_t* restrict ch = &ovl_ch[crow * ORIC_OVL_COLS];
+    const uint8_t* restrict at = &ovl_at[crow * ORIC_OVL_COLS];
+    uint8_t* restrict out = line_buff;
+    for (int c = 0; c < ORIC_OVL_COLS; c++) {
+      const uint8_t bits = oric_glyph_row((char)ch[c], grow);
+      const uint8_t fg = at[c] & 7u;
+      const uint8_t bg = (uint8_t)((at[c] >> 4) & 7u);
+      // font8x8 rows are LSB-left: bit 0 is the leftmost pixel.
+      for (int b = 0; b < 8; b++) {
+        *out++ = (bits & (1u << b)) ? fg : bg;
       }
     }
-
-    uint16_t* restrict dst_line =
-        fb + (screen_y * ATARI_ST_FRAMEBUFFER_LINE_SIZE_16WORDS);
-    _oric_pack_line(dst_line, line_buff);
+    _oric_pack_line(fb + (py * ATARI_ST_FRAMEBUFFER_LINE_SIZE_16WORDS),
+                    line_buff);
   }
 
   sys->fb_frame_counter = next_count;
@@ -624,6 +664,25 @@ void oric_show_msg(oric_t* sys, const char* msg) {
   uint16_t* fb_counter = (uint16_t*)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
   *fb_counter = next_count;
   sys->screen_dirty = false;
+}
+
+void oric_show_msg(oric_t* sys, const char* msg) {
+  CHIPS_ASSERT(sys && sys->valid);
+  if (!msg || *msg == '\0') {
+    return;
+  }
+  // A centred single line, now expressed through the overlay primitives rather
+  // than its own glyph loop. Keeping it on the shared path means the loading
+  // message doubles as the smoke test for the cell overlay.
+  const uint8_t attr = ORIC_OVL_ATTR(7, 0);
+  oric_ovl_clear(attr);
+  int len = (int)strlen(msg);
+  int col = (ORIC_OVL_COLS - len) / 2;
+  if (col < 0) {
+    col = 0;
+  }
+  oric_ovl_text(col, ORIC_OVL_ROWS / 2, msg, attr);
+  oric_ovl_present(sys);
 }
 
 int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
