@@ -663,7 +663,11 @@ void __not_in_flash_func(oric_ovl_present)(oric_t* sys) {
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
   uint16_t* fb_counter = (uint16_t*)(fb_base + ATARI_ST_FRAME_COUNTER_OFFSET);
   *fb_counter = next_count;
-  sys->screen_dirty = false;
+  // Deliberately does NOT clear screen_dirty. The overlay did not render the
+  // Oric screen, it overwrote it -- so any pending dirty state must survive,
+  // or the Oric screen never comes back once the overlay goes away. That is
+  // invisible while the Oric is writing to screen RAM every frame, and very
+  // visible during a tape load, when it writes nothing for seconds at a time.
 }
 
 void oric_show_msg(oric_t* sys, const char* msg) {
