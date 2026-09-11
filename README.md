@@ -23,8 +23,8 @@ firmware (`rp/`) and target-computer firmware (`target/atarist/`).
 This emulator is based on the [Reload Emulator](https://github.com/vsladkov/reload-emulator)
 project by Veselin Sladkov. **Huge thanks** for his great work!
 
-The floppy disk controller — WD1793 and Microdisc — is ported from
-[Oricutron](https://github.com/pete-gordon/oricutron) by Peter Gordon and
+The floppy disk controller (a WD1793 with a Microdisc around it) is ported
+from [Oricutron](https://github.com/pete-gordon/oricutron) by Peter Gordon and
 contributors, used with his specific permission
 ([oricutron#216](https://github.com/pete-gordon/oricutron/issues/216)).
 Thanks to Pete and the Oricutron team.
@@ -52,17 +52,32 @@ After installation, the Oric Emulator will start automatically every time your A
 
 Everything lives in the `/oric` directory on the SidecarTridge microSD card.
 
-**ROMs.** Copy one or more Oric ROM images there with a `.rom` extension — for
-example `basic11b.rom`. They must be 16 KB. There are plenty of Oric ROM images
-online; search for "orica.zip" or similar, or see the
-[microfirmware documentation](https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/oric-emulator/).
+**ROMs.** Copy one or more Oric ROM images there with a `.rom` extension. They
+must be 16 KB. [6502Nerd's dflat
+repository](https://github.com/6502Nerd/dflat/tree/Oric/Oric/emulator/roms)
+carries the usual ones in a public Git tree:
 
-**Tapes.** Copy `.tap` files to the same directory. Any filename works — you
-pick them from a menu, so there is no naming convention to remember.
+| File | What it is |
+| --- | --- |
+| `basic11b.rom` | Oric Atmos BASIC 1.1b, the one to start with |
+| `basic10.rom` | Oric-1 BASIC 1.0, for software that needs the older machine |
+| `dflat.rom` | dflat, 6502Nerd's own language ROM |
+| `MICRODIS.ROM` | the Microdisc EPROM. Not a BASIC ROM. See **Disks** below |
+
+The other `.rom` files in that folder are EPROMs for disk controllers this
+emulator does not emulate (Jasmin, Byte Drive 500, Cumana). They are smaller
+than 16 KB, so the menu will not offer them.
+
+There is also the [microfirmware
+documentation](https://docs.sidecartridge.com/sidecartridge-multidevice/microfirmwares/oric-emulator/),
+which the emulator shows as a QR code when it finds no ROM.
+
+**Tapes.** Copy `.tap` files to the same directory. Any filename works, since
+you pick them from a menu rather than by name.
 
 **Disks (optional).** To use disk images you need the Oric **Microdisc ROM**:
 an 8 KB file, copied to the same directory as `microdisc.rom` or
-`microdis.rom` — the name it is usually distributed under. Case does not
+`microdis.rom`, the name it is usually distributed under. Case does not
 matter, so `MICRODIS.ROM` works as downloaded. It is deliberately not shown in
 the ROM menu: it is the disk controller's EPROM, not a BASIC ROM. Then copy
 `.dsk` images alongside it. They
@@ -70,10 +85,10 @@ must be in the **MFM_DISK** format used by Oricutron and Euphoric (the common
 format on oric.org); other `.dsk` flavours are refused with a message.
 
 The emulated machine is an Atmos with a Microdisc, so the disk must carry a
-Microdisc-bootable DOS — Sedoric, in practice. **Telestrat disks** (Stratsed;
-oric.org often labels them `Telestrat`) boot only on a Telestrat, and the
-Microdisc ROM answers them with `NO OPERATING SYSTEM`. Most titles exist in an
-Atmos/Sedoric version as well — pick that one.
+Microdisc-bootable DOS, which in practice means Sedoric. **Telestrat disks**
+(Stratsed; oric.org often labels them `Telestrat`) boot only on a Telestrat,
+and the Microdisc ROM answers them with `NO OPERATING SYSTEM`. Most titles
+exist in an Atmos/Sedoric version as well, so look for that one.
 
 That is all the setup there is. Subdirectories, hidden files and system files
 are ignored, so a card written from macOS or Windows will not show stray
@@ -86,11 +101,18 @@ On the first boot the emulator needs to know which ROM to use:
 - If the card holds **exactly one** `.rom` file, it is installed automatically
   and the emulator starts.
 - If it holds **several**, a list appears and you choose one.
-- If it holds **none**, the screen tells you what to copy where.
+- If it holds **none**, the screen tells you what to copy where, with a QR
+  code to the setup guide.
 
 Installing a ROM copies it into place and reboots the Multi-device, which takes
 a couple of seconds. The choice is remembered, so later boots go straight to the
 Oric.
+
+With **no microSD card** at all the emulator cannot run: it says so and hands
+back to GEM. Insert a card and reset, and it starts normally.
+
+While the Oric is booting, **Press F1 for config menu** appears over the
+screen for a few seconds, then gets out of the way.
 
 ### The menu
 
@@ -101,7 +123,7 @@ Press **F1** at any time to open the menu:
 | **SELECT ROM** | Choose a different ROM and restart with it |
 | **SELECT TAPE** | Insert a `.tap` into the virtual cassette drive |
 | **EJECT TAPE** | Remove the current tape (shown only while one is inserted) |
-| **SELECT DISK (EXPERIMENTAL)** | Insert a `.dsk` and boot it — the Oric resets with the Microdisc ROM active, the way a real one boots with a disk in the drive |
+| **SELECT DISK (EXPERIMENTAL)** | Insert a `.dsk` and boot it. The Oric resets with the Microdisc ROM active, the way a real one boots with a disk in the drive |
 | **EJECT DISK (EXPERIMENTAL)** | Remove the current disk; the Oric keeps running (shown only while one is inserted) |
 | **RESET ORIC** | A power cycle: memory is cleared, then the disk boots if one is inserted, otherwise BASIC starts fresh. (HELP is the soft reset that keeps memory.) |
 | **STATUS** | Version, current ROM, tape and disk, and emulator timing |
@@ -115,8 +137,8 @@ left/right jump a page at a time.
 
 After inserting a tape, type `CLOAD""` at the Oric BASIC prompt to load it. A
 green progress bar along the bottom of the screen shows how far through the tape
-you are, and `TAPE FINISHED` appears briefly when it reaches the end — so you can
-tell a load that is working from one that has stalled. You can find plenty of
+you are, and `TAPE FINISHED` appears briefly when it reaches the end, so you
+can tell a load that is working from one that has stalled. You can find plenty of
 Oric software online in places like [Oric.org](http://www.oric.org/).
 
 ### Other keys
@@ -129,7 +151,7 @@ Oric software online in places like [Oric.org](http://www.oric.org/).
 | **UNDO** | Non-maskable interrupt (break) |
 | **HOME** | Show screen-conversion timing without opening the menu |
 
-Every other key goes to the Oric, including F2–F10. The Atari ST layout is
+Every other key goes to the Oric, including F2-F10. The Atari ST layout is
 mapped to the Oric's keyboard, so a few symbols sit where the Oric expects
 them rather than where the ST key cap says.
 
@@ -150,6 +172,14 @@ After a power cycle, the emulator auto-launches.
 
 The Oric Emulator is built using the Reload Emulator core, adapted to run on the
 SidecarTridge Multi-device platform.
+
+The RP2040 does nearly all the work. One core runs the Oric at 1 MHz (the
+6502, the 6522 VIA, the AY-3-8912 and the memory map). The other converts the
+Oric's 240×224 screen into the Atari's planar format about 50 times a second.
+The Atari copies that ready-made screen into video memory each frame, forwards
+keystrokes back over the cartridge bus, and replays the Oric's sound-chip
+writes on its own YM2149. The floppy controller is a WD1793 with a Microdisc
+around it, reading one track of the disk image at a time from the card.
 
 ## Repository layout
 
@@ -176,21 +206,27 @@ GitHub repository.
 
 Done since the first release:
 
-- [x] TAP file load menu — tapes are chosen from an on-screen list instead of
+- [x] TAP file load menu. Tapes are chosen from an on-screen list instead of
   function keys.
-- [x] Direct TAP file load — `.tap` files play as they are read, with no
+- [x] Direct TAP file load. `.tap` files play as they are read, with no
   conversion step and nothing written to your card.
-- [x] Faster framebuffer build — the Oric-to-Atari screen conversion is about
+- [x] Faster framebuffer build. The Oric-to-Atari screen conversion is about
   30% cheaper per frame.
-- [x] Better framebuffer — dropped frames and tearing are gone. One frame of
-  latency remains and is inherent: the Atari has to copy the screen before it
-  can show it.
+- [x] Better framebuffer. Dropped frames and tearing are gone. One frame of
+  latency remains and is inherent, because the Atari has to copy the screen
+  before it can show it.
+
+- [x] Floppy disk support. A Microdisc with a WD1793, so standard `.dsk`
+  images boot. One drive, read a track at a time from the card. Experimental
+  in this release.
+- [x] An on-screen menu for choosing ROMs, tapes and disks, and for resetting
+  the Oric.
+- [x] A keyboard that keeps up. No lost keystrokes, and no keys stuck down.
 
 Still open:
 
 - [ ] Joystick/gamepad support.
-- [x] Floppy disk support — a Microdisc with a WD1793, so standard `.dsk`
-  images boot. One drive; the disk is read a track at a time from the card.
+- [ ] A second disk drive, and disk write-protect from the menu.
 - [ ] Further performance improvements.
 
 ## License
