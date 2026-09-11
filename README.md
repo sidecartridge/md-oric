@@ -81,6 +81,8 @@ Press **F1** at any time to open the menu:
 | **SELECT TAPE** | Insert a `.tap` into the virtual cassette drive |
 | **EJECT TAPE** | Remove the current tape |
 | **STATUS** | Version, current ROM and tape, and emulator timing |
+| **HELP** | The keys and how to load a tape or change the ROM, on screen |
+| **RETURN TO BOOSTER** | Leave the emulator and cold-boot the ST into the Booster app |
 | **RESUME** | Back to the Oric |
 
 Use the **arrow keys** to move, **Return** to choose, and **ESC** to go back a
@@ -105,11 +107,10 @@ Oric software online in places like [Oric.org](http://www.oric.org/).
 
 ### ⏏️ Exiting to Booster
 
-The emulator cannot exit back to GEM or the Booster interface directly. To exit
-the emulator and return to the Booster app, you need to **power cycle** your
-Atari ST and at the same time hold down the **SELECT** button on the
-SidecarTridge. This will interrupt the normal boot process and launch the
-Booster app instead of the Oric Emulator.
+Choose **RETURN TO BOOSTER** from the menu. The screen goes black, the Atari ST
+cold-boots, and the Booster app comes up. The old route still works too: power
+cycle the Atari ST while holding the **SELECT** button on the SidecarTridge,
+which interrupts the normal boot and launches the Booster app instead.
 
 
 ### 🔄 Power Cycling

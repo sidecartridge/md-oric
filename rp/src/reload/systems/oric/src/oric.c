@@ -112,7 +112,8 @@ enum {
   ORIC_UI_MENU = 1,
   ORIC_UI_ROMLIST = 2,
   ORIC_UI_TAPELIST = 3,
-  ORIC_UI_STATUS = 4
+  ORIC_UI_STATUS = 4,
+  ORIC_UI_HELP = 5
 };
 
 
@@ -171,10 +172,10 @@ static void oric_core1_resume(void) {
 // "RETURN TO BOOSTER" sits second-to-last deliberately. The main menu wraps,
 // so the last entry is one UP press from the default selection -- not where a
 // one-way exit belongs.
-#define ORIC_MENU_ITEMS 6
+#define ORIC_MENU_ITEMS 7
 static const char* const oric_menu_items[ORIC_MENU_ITEMS] = {
-    "SELECT ROM", "SELECT TAPE",       "EJECT TAPE",
-    "STATUS",     "RETURN TO BOOSTER", "RESUME"};
+    "SELECT ROM", "SELECT TAPE", "EJECT TAPE",       "STATUS",
+    "HELP",       "RETURN TO BOOSTER", "RESUME"};
 
 static volatile uint8_t oric_ui_state = ORIC_UI_EMULATING;
 static volatile bool oric_ui_redraw = false;
@@ -278,7 +279,7 @@ static void oric_menu_render(oric_t* sys) {
 
   const uint8_t sel = oric_menu_sel;
   for (int i = 0; i < ORIC_MENU_ITEMS; i++) {
-    const int row = 7 + i * 2;
+    const int row = 5 + i * 2;  // 7 entries: rows 5..17, clear of ROM/TAPE
     const uint8_t attr = (i == sel) ? ORIC_ATTR_HILITE : ORIC_ATTR_NORMAL;
     // Highlight the whole bar, not just the text, so the selection reads
     // clearly at 8x8 -- the cell attribute does the job a filled rect does
@@ -692,6 +693,43 @@ static void oric_return_to_booster(oric_t* sys) {
   }
 }
 
+// Read-only page: the keys and the two things people actually need to do.
+// Same shape as the status screen -- no selection, ESC out. Deliberately
+// lowercase-heavy: it is the screen most exposed to the descender glyphs.
+static void oric_help_render(oric_t* sys) {
+  oric_ovl_clear(ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 1, "HELP", ORIC_ATTR_NORMAL);
+
+  oric_ovl_text(2, 3, "Menu", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 4, "F1      open the menu", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 5, "ESC     back / close", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 6, "Up/Dn   move", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 7, "L/R     page a list", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 8, "Return  choose", ORIC_ATTR_NORMAL);
+
+  oric_ovl_text(2, 10, "Oric", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 11, "HELP    reset the Oric", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 12, "UNDO    break (NMI)", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 13, "HOME    show timing", ORIC_ATTR_NORMAL);
+
+  oric_ovl_text(2, 15, "Loading a tape", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 16, "F1, SELECT TAPE, pick a", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 17, "file, then type CLOAD\"\"", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 18, "at the BASIC prompt.", ORIC_ATTR_NORMAL);
+
+  oric_ovl_text(2, 20, "Changing the ROM", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 21, "F1, SELECT ROM, pick one.", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 22, "The emulator reboots.", ORIC_ATTR_NORMAL);
+
+  oric_ovl_text(2, 25, "ESC=BACK", ORIC_ATTR_DIM);
+  oric_ovl_present(sys);
+}
+
+static void oric_help_open(void) {
+  oric_ui_repaint();
+  oric_ui_state = ORIC_UI_HELP;
+}
+
 static void oric_status_open(void) {
   oric_ui_repaint();
   oric_ui_state = ORIC_UI_STATUS;
@@ -737,6 +775,9 @@ static bool oric_menu_key(oric_t* sys, int code) {
           oric_status_open();
           break;
         case 4:
+          oric_help_open();
+          break;
+        case 5:
           oric_return_to_booster(sys);
           break;
         case ORIC_MENU_ITEMS - 1:
@@ -898,6 +939,7 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
       case ORIC_UI_ROMLIST:
       case ORIC_UI_TAPELIST:
       case ORIC_UI_STATUS:
+      case ORIC_UI_HELP:
         oric_ui_state = ORIC_UI_MENU;
         oric_ui_repaint();
         break;
@@ -916,8 +958,8 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
     (void)oric_romlist_key(sys, code);
     return;
   }
-  if (oric_ui_state == ORIC_UI_STATUS) {
-    return;  // read-only screen; F1 above is the way out
+  if (oric_ui_state == ORIC_UI_STATUS || oric_ui_state == ORIC_UI_HELP) {
+    return;  // read-only screens; ESC above is the way out
   }
 
   switch (code) {
@@ -1000,6 +1042,8 @@ void __not_in_flash_func(core1_main()) {
             oric_list_render(&state.oric);
           } else if (oric_ui_state == ORIC_UI_STATUS) {
             oric_status_render(&state.oric);
+          } else if (oric_ui_state == ORIC_UI_HELP) {
+            oric_help_render(&state.oric);
           } else {
             oric_menu_render(&state.oric);
           }
