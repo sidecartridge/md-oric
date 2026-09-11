@@ -83,7 +83,7 @@ Press **F1** at any time to open the menu:
 | **STATUS** | Version, current ROM and tape, and emulator timing |
 | **RESUME** | Back to the Oric |
 
-Use the **arrow keys** to move, **Return** to choose, and **F1** to go back a
+Use the **arrow keys** to move, **Return** to choose, and **ESC** to go back a
 level or close the menu. Lists longer than one page scroll with up/down, and
 left/right jump a page at a time.
 
@@ -97,7 +97,8 @@ Oric software online in places like [Oric.org](http://www.oric.org/).
 
 | Key | Action |
 | --- | --- |
-| **F1** | Open or close the menu |
+| **F1** | Open the menu |
+| **ESC** | Go back a level, or close the menu |
 | **HELP** | Soft reset of the Oric |
 | **UNDO** | Non-maskable interrupt (break) |
 | **HOME** | Show screen-conversion timing without opening the menu |
