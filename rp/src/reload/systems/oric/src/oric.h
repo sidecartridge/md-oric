@@ -73,6 +73,7 @@
 #include "chips/mos6522via.h"
 #include "constants.h"
 #include "devices/oric_microdisc.h"
+#include "oric_qr_docs.h"
 #include "devices/oric_td.h"
 
 #ifdef __cplusplus
@@ -151,9 +152,13 @@ static inline uint32_t _oric_as_m68k_long(uint32_t v) {
   (ATARI_ST_FRAMEBUFFERS_OFFSET + ATARI_ST_FRAMEBUFFER_SIZE_BYTES)
 // SAFEGUARD END
 
-// The Microdisc EPROM's fixed name in the content folder (D-17). The ROM
-// picker skips it; its presence is what makes the controller exist.
+// Names accepted for the Microdisc EPROM in the content folder (D-17). The
+// ROM picker skips them; the file's presence is what makes the controller
+// exist. Two spellings because the copies in circulation disagree: our docs
+// say microdisc.rom, while Oricutron and the MiSTer core ship the 8.3 name
+// MICRODIS.ROM. Matching is case-insensitive, so only the stems differ.
 #define ORIC_MICRODISC_ROM_NAME "microdisc.rom"
+#define ORIC_MICRODISC_ROM_ALT "microdis.rom"
 
 // Config parameters for oric_init()
 typedef struct {
@@ -272,6 +277,9 @@ void oric_ovl_clear(uint8_t attr);
 void oric_ovl_text(int col, int row, const char* str, uint8_t attr);
 void oric_ovl_fill(int col, int row, int ncols, uint8_t attr);
 void oric_ovl_present(oric_t* sys);
+// Overlay the docs QR code on the current frame, centred horizontally with
+// its top at `y0`. Call it after oric_ovl_present().
+void oric_ovl_qr(oric_t* sys, int y0);
 void oric_ayQueuePush(uint16_t* queue, uint16_t* head, uint16_t value);
 
 #ifdef __cplusplus
@@ -799,6 +807,53 @@ void oric_show_msg(oric_t* sys, const char* msg) {
 // Drawn into the framebuffer after the conversion, like the tape band, so the
 // Oric screen underneath is untouched.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Docs QR code. Drawn into the framebuffer like the tape band, straight from
+// the pre-computed bitmap -- dark modules on a light field, with the quiet
+// zone the spec requires, because a code without it will not scan.
+// ---------------------------------------------------------------------------
+#define ORIC_QR_QUIET 4  // modules of light border, per the QR spec
+#define ORIC_QR_SCALE 2  // screen pixels per module
+#define ORIC_QR_SIDE_PX \
+  ((ORIC_QR_MODULES + 2 * ORIC_QR_QUIET) * ORIC_QR_SCALE)
+
+// Draw the code with its top-left at (x0, y0). Everything else on those
+// scanlines is blacked out: _oric_pack_line rewrites a whole line, so the
+// caller must place this where no text is.
+static void __not_in_flash_func(_oric_draw_qr)(uint16_t* restrict fb, int x0,
+                                               int y0) {
+  for (int py = 0; py < ORIC_QR_SIDE_PX; py++) {
+    const int y = y0 + py;
+    if (y < 0 || y >= ORIC_SCREEN_HEIGHT) {
+      continue;
+    }
+    memset(line_buff, 0, sizeof(line_buff));
+    // The module row under this scanline, or -1 while inside the quiet zone.
+    const int mrow = (py / ORIC_QR_SCALE) - ORIC_QR_QUIET;
+    for (int px = 0; px < ORIC_QR_SIDE_PX; px++) {
+      const int x = x0 + px;
+      if (x < 0 || x >= ORIC_SCREEN_WIDTH) {
+        continue;
+      }
+      const int mcol = (px / ORIC_QR_SCALE) - ORIC_QR_QUIET;
+      uint8_t dark = 0;
+      if (mrow >= 0 && mrow < ORIC_QR_MODULES && mcol >= 0 &&
+          mcol < ORIC_QR_MODULES) {
+        const uint8_t bits = oric_qr_docs[mrow * ORIC_QR_STRIDE + (mcol >> 3)];
+        dark = (bits >> (7 - (mcol & 7))) & 1u;
+      }
+      line_buff[x] = dark ? 0 : 7;  // black modules on white
+    }
+    _oric_pack_line(fb + (y * ATARI_ST_FRAMEBUFFER_LINE_SIZE_16WORDS),
+                    line_buff);
+  }
+}
+
+void oric_ovl_qr(oric_t* sys, int y0) {
+  CHIPS_ASSERT(sys && sys->valid);
+  _oric_draw_qr(sys->fb, (ORIC_SCREEN_WIDTH - ORIC_QR_SIDE_PX) / 2, y0);
+}
+
 #define ORIC_HINT_ROWS 8
 static volatile bool oric_boot_hint_active;
 

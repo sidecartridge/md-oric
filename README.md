@@ -61,9 +61,11 @@ online; search for "orica.zip" or similar, or see the
 pick them from a menu, so there is no naming convention to remember.
 
 **Disks (optional).** To use disk images you need the Oric **Microdisc ROM**:
-an 8 KB file, copied to the same directory under the exact name
-`microdisc.rom`. It is deliberately not shown in the ROM menu — it is the disk
-controller's EPROM, not a BASIC ROM. Then copy `.dsk` images alongside it. They
+an 8 KB file, copied to the same directory as `microdisc.rom` or
+`microdis.rom` — the name it is usually distributed under. Case does not
+matter, so `MICRODIS.ROM` works as downloaded. It is deliberately not shown in
+the ROM menu: it is the disk controller's EPROM, not a BASIC ROM. Then copy
+`.dsk` images alongside it. They
 must be in the **MFM_DISK** format used by Oricutron and Euphoric (the common
 format on oric.org); other `.dsk` flavours are refused with a message.
 
