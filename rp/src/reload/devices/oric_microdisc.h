@@ -35,6 +35,9 @@
 //   - MICRODISC_FUDGE (never defined upstream), the Jasmin / Byte Drive 500 /
 //     Pravetz controllers, popups and debug output are not carried over.
 //   - `last_step_in` lives in the controller struct instead of a file static.
+//   - Write protection is honoured: a read-only image refuses WRITE SECTOR /
+//     WRITE TRACK with WSF_WRPROT and reports the bit in Type I status.
+//     Upstream never sets that bit.
 //
 // Header-only in md-oric's CHIPS_IMPL style: oric.c defines CHIPS_IMPL once.
 //
@@ -511,6 +514,8 @@ void wd17xx_seek_track(oric_wd17xx_t* wd, uint8_t track) {
       wd->distatus = WSFI_HEADL | WSFI_PULSE;
     }
 
+    if (dimg->wrprot) wd->distatus |= WSF_WRPROT;
+
     // Cache the new track
     diskimage_cachetrack(dimg, track, wd->c_side);
 
@@ -837,6 +842,13 @@ void wd17xx_write(oric_wd17xx_t* wd, uint16_t addr, uint8_t data) {
           break;
 
         case 0xa0:  // Write sector (Type II)
+          if (wd->disk[wd->c_drive] && wd->disk[wd->c_drive]->wrprot) {
+            wd->r_status = WSF_WRPROT;
+            wd->clrdrq(wd->drqarg);
+            wd->setintrq(wd->intrqarg);
+            wd->currentop = COP_NUFFINK;
+            break;
+          }
           wd->curroffs = 0;
           wd->currsector = wd17xx_find_sector(wd, wd->r_sector);
           if (!wd->currsector) {
@@ -896,6 +908,13 @@ void wd17xx_write(oric_wd17xx_t* wd, uint16_t addr, uint8_t data) {
               break;
 
             case 0x10:  // Write track (Type III)
+              if (wd->disk[wd->c_drive] && wd->disk[wd->c_drive]->wrprot) {
+                wd->r_status = WSF_WRPROT;
+                wd->clrdrq(wd->drqarg);
+                wd->setintrq(wd->intrqarg);
+                wd->currentop = COP_NUFFINK;
+                break;
+              }
               wd->curroffs = 0;
               wd->r_status = WSF_NOTREADY | WSF_BUSY;
               wd->delayeddrq = 500;

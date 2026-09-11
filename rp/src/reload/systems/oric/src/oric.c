@@ -617,6 +617,24 @@ static void oric_insert_tape(oric_t* sys, const char* name) {
   oric_set_msg(msg);
 }
 
+// A dirty track is flushed when the head moves or the disk is ejected. A save
+// followed by a power-off would lose it, so also flush after ~2 s with no
+// controller activity -- from Core 0, which owns the card, and only between
+// operations so a half-written sector is never what lands on the file.
+#define ORIC_DISK_IDLE_FLUSH_FRAMES 100
+static void oric_disk_idle_flush(oric_t* sys) {
+  static uint16_t dirty_frames = 0;
+  if (!sys->disk.inserted || !sys->disk.dirty ||
+      sys->wd.currentop != COP_NUFFINK) {
+    dirty_frames = 0;
+    return;
+  }
+  if (++dirty_frames >= ORIC_DISK_IDLE_FLUSH_FRAMES) {
+    dirty_frames = 0;
+    (void)diskimage_flush(&sys->disk);
+  }
+}
+
 static void oric_disklist_open(void) {
   oric_scan_files(".dsk");
   oric_list_sel = 0;
@@ -1411,6 +1429,7 @@ int __not_in_flash_func(oric_main)() {
         oric_tick(&state.oric);
       }
     }
+    oric_disk_idle_flush(&state.oric);
 
     static bool shift_pressed = false;
     static bool ctrl_pressed = false;
