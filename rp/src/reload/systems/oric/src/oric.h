@@ -118,6 +118,21 @@ extern uint8_t oric_rom[ORIC_ROM_SIZE];
 // written natively by the RP would reach the ST with its halfwords swapped. A
 // 16-bit value crosses the bus intact (the PIO's DMA does a halfword load).
 // Bytes 0x0FFE-0x0FFF are unused padding up to the framebuffer at 0x1000.
+// RP->m68k command longword, polled once per VBL by the cart code. Sits past
+// the ~1.3 KB image but inside the $1000 copied to ST RAM, so the poll works
+// from the copy. Must match LISTENER_ADDR / REMOTE_RESET in main.s.
+#define ATARI_ST_LISTENER_OFFSET 0x05F8
+#define ATARI_ST_REMOTE_RESET 1u
+
+// The cart bus swaps bytes within each 16-bit word, which makes uint16_t
+// transparent -- but an m68k move.l is two word reads in (high, low) order
+// while the halves stay in their RP positions, so a uint32_t arrives with its
+// halves swapped. Store exact-value longwords half-swapped. Same rule as
+// cart_asM68kLong() in md-framebuffer-template's cart_shared.h.
+static inline uint32_t _oric_as_m68k_long(uint32_t v) {
+  return (v << 16) | (v >> 16);
+}
+
 #define ATARI_ST_FRAME_COUNTER_OFFSET 0x0FFCu
 // The two framebuffers. B sits in the upper half of the 64 KB window, freed by
 // moving oric_rom into ORIC_RAM. The window is linear: the PIO builds the read

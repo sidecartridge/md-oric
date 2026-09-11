@@ -168,9 +168,13 @@ static void oric_core1_resume(void) {
   oric_c1_pause_req = false;
 }
 
-#define ORIC_MENU_ITEMS 5
+// "RETURN TO BOOSTER" sits second-to-last deliberately. The main menu wraps,
+// so the last entry is one UP press from the default selection -- not where a
+// one-way exit belongs.
+#define ORIC_MENU_ITEMS 6
 static const char* const oric_menu_items[ORIC_MENU_ITEMS] = {
-    "SELECT ROM", "SELECT TAPE", "EJECT TAPE", "STATUS", "RESUME"};
+    "SELECT ROM", "SELECT TAPE",       "EJECT TAPE",
+    "STATUS",     "RETURN TO BOOSTER", "RESUME"};
 
 static volatile uint8_t oric_ui_state = ORIC_UI_EMULATING;
 static volatile bool oric_ui_redraw = false;
@@ -644,6 +648,50 @@ static void oric_status_render(oric_t* sys) {
   oric_ovl_present(sys);
 }
 
+// Leave the emulator for the Booster app.
+//
+// Not a direct jump. reset_jump_to_booster() is a raw VTOR + stack-pointer
+// swap and its own comment says it belongs at the top of main(), where
+// nothing is running yet. From here the cartridge PIO and DMA are live, the
+// DMA IRQ is enabled, Core 1 is executing our code rather than waiting in the
+// bootrom, and the clock is at 260 MHz -- Booster inherits all of that and
+// hangs. Tried; it does not come up.
+//
+// Instead do what md-testrom does, but through a full reset: point
+// BOOT_FEATURE away from this app and reboot. main() then runs gconfig_init,
+// sees the mismatch, and takes the Booster jump at the one place it is safe.
+// Same shutdown discipline as installing a ROM: blank the screen first, since
+// the ST holds its last page once the RP stops answering the bus.
+static void oric_return_to_booster(oric_t* sys) {
+  oric_core1_pause();
+
+  (void)settings_put_string(gconfig_getContext(), PARAM_BOOT_FEATURE,
+                            "BOOSTER");
+  (void)settings_save(gconfig_getContext(), true);
+
+  oric_ovl_clear(ORIC_ATTR_NORMAL);
+  oric_ovl_text(1, 10, "Returning to Booster...", ORIC_ATTR_NORMAL);
+  oric_ovl_present(sys);
+  sleep_ms(ORIC_REBOOT_MSG_MS);
+
+  oric_ovl_clear(ORIC_OVL_ATTR(0, 0));
+  oric_ovl_present(sys);
+  sleep_ms(ORIC_BLACK_FRAME_MS);  // let the m68k actually blit it
+
+  // Now ask the ST to cold-reset itself. The cart code polls this longword
+  // once per VBL, then waits ~1 s before jumping through the reset vector, so
+  // TOS scans the cartridge after Booster is back on the bus. Without this
+  // the ST stays in our copied loop with the Oric palette and no frames.
+  *((volatile uint32_t*)((uint8_t*)&__rom_in_ram_start__ + ATARI_ST_LISTENER_OFFSET)) =
+      _oric_as_m68k_long(ATARI_ST_REMOTE_RESET);
+  sleep_ms(100);  // several VBLs, so the m68k has seen it before we go
+
+  watchdog_reboot(0, 0, RESET_WATCHDOG_TIMEOUT);
+  while (1) {
+    tight_loop_contents();
+  }
+}
+
 static void oric_status_open(void) {
   oric_ui_repaint();
   oric_ui_state = ORIC_UI_STATUS;
@@ -687,6 +735,9 @@ static bool oric_menu_key(oric_t* sys, int code) {
           break;
         case 3:
           oric_status_open();
+          break;
+        case 4:
+          oric_return_to_booster(sys);
           break;
         case ORIC_MENU_ITEMS - 1:
           oric_menu_close(sys);
@@ -1100,6 +1151,10 @@ int __not_in_flash_func(oric_main)() {
   }
 
   DPRINTF("Core 1 start\n");
+  // The region past the cart image is never zeroed, so make sure the ST does
+  // not read a leftover reset command on its first VBL.
+  *((volatile uint32_t*)((uint8_t*)&__rom_in_ram_start__ + ATARI_ST_LISTENER_OFFSET)) = 0;
+
   multicore_launch_core1(core1_main);
 
   uint32_t num_ticks = 19968;
