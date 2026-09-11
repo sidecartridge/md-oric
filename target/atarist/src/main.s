@@ -60,6 +60,8 @@ CMD_KEYRELEASE		      equ ($0CBA) 					  ; Legacy (check_keys)
 CMD_BOOSTER		      	  equ ($0DEF) 					  ; Booster command
 
 LISTENER_ADDR		      equ (ROM4_ADDR + $5F8)		  ; RP->m68k command longword, polled once per VBL (past the code, inside the copied $1000)
+BOOTSTATUS_ADDR		      equ (ROM4_ADDR + $5FC)		  ; RP->m68k word, read once at startup: 0 = go, 1 = no microSD card
+BOOT_NO_SDCARD		      equ $1						  ; The RP could not mount a card, so there is no ROM to run
 REMOTE_RESET		      equ $1					      ; The device ask to reset the
 
 AYBUFF_POS		          equ $8                          ; Offset of the AY sound buffer position
@@ -172,6 +174,14 @@ pre_auto:
 	get_rez
 	tst.w d0
 	bne lowres_only
+
+; The RP has already tried to mount the microSD card by now. Without one there
+; is no Oric ROM to run, so take the same exit as the resolution check: say
+; why, and hand back to GEM.
+.check_sdcard:
+	move.w BOOTSTATUS_ADDR, d0
+	cmp.w #BOOT_NO_SDCARD, d0
+	beq no_sdcard
 
 start_oric:
 ; Move the code below the screen memory
@@ -516,6 +526,17 @@ lowres_only:
 
 lowres_only_txt: 
 	dc.b "Oric Emulator only supports low res",$d,$a
+	dc.b 0
+
+	even
+
+no_sdcard:
+	print no_sdcard_txt
+    rts
+
+no_sdcard_txt:
+	dc.b "Oric Emulator: no microSD card.",$d,$a
+	dc.b "Insert one and reset.",$d,$a
 	dc.b 0
 
 	even

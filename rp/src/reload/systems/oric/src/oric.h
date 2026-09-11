@@ -122,6 +122,15 @@ extern uint8_t oric_rom[ORIC_ROM_SIZE];
 #define ATARI_ST_LISTENER_OFFSET 0x05F8
 #define ATARI_ST_REMOTE_RESET 1u
 
+// RP->m68k boot status, read once by the cartridge before it commits to
+// running the emulator. Without a card there is no ROM, so the cart code
+// prints a line and returns to GEM -- the same exit as the resolution check.
+// 16-bit, so the bus byte-swap within a word is transparent (as for the
+// frame counter). Must match BOOTSTATUS_ADDR / BOOT_NO_SDCARD in main.s.
+#define ATARI_ST_BOOTSTATUS_OFFSET 0x05FC
+#define ATARI_ST_BOOT_OK 0u
+#define ATARI_ST_BOOT_NO_SDCARD 1u
+
 // The cart bus swaps bytes within each 16-bit word, which makes uint16_t
 // transparent -- but an m68k move.l is two word reads in (high, low) order
 // while the halves stay in their RP positions, so a uint32_t arrives with its
