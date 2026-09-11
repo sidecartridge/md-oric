@@ -31,7 +31,12 @@ AYBUFFER_ADDR		equ (FRAMEBUFFER_A_ADDR + (ORIC_LINES*ORIC_WORDS_PER_LINE*2*3)) ;
 AYBUFFER_SIZE		equ 512 ; Size of the AY sound buffer in bytes
 COPIED_CODE_OFFSET	equ $00010000 ; The offset should be below the screen memory
 COPIED_CODE_SIZE	equ $00001000
-PRE_RESET_WAIT		equ $0000FFFF ; Wait this many cycles before resetting the computer
+; Delay between seeing REMOTE_RESET and jumping through the reset vector. The
+; RP reboots into Booster right after writing the command, and TOS must not scan
+; the cartridge before Booster is back on the bus. $FFFF (~65 ms) is shorter
+; than an RP reboot; $FFFFF (~1 s) is what Booster itself uses in the other
+; direction, so match it.
+PRE_RESET_WAIT		equ $000FFFFF ; Wait this many cycles before resetting the computer
 SCREEN_A_BASE_ADDR  equ $60000 ; The screen memory address for the framebuffer
 SCREEN_B_BASE_ADDR  equ $70000 ; The screen memory address for the framebuffer
 ORIC_LINES		 	equ 224
@@ -49,7 +54,7 @@ CMD_KEYRELEASE		      equ ($0CBA) 					  ; Key release
 CMD_BOOSTER		      	  equ ($0DEF) 					  ; Booster command
 CMD_BLITDONE		      equ ($0ACE)					  ; Blit finished, RP may reuse the other buffer
 
-LISTENER_ADDR		      equ (ROM4_ADDR + $5F8)		  ; The address of the listener
+LISTENER_ADDR		      equ (ROM4_ADDR + $5F8)		  ; RP->m68k command longword, polled once per VBL (past the code, inside the copied $1000)
 REMOTE_RESET		      equ $1					      ; The device ask to reset the
 
 AYBUFF_POS		          equ $8                          ; Offset of the AY sound buffer position
@@ -276,6 +281,16 @@ start_rom_code:
 	bra.s .continue_ay_sound
 
 .no_ay_sound:
+	; Once per VBL: has the RP asked us to reset the ST? It does this before
+	; rebooting itself into Booster, so the machine cold-boots into Booster's
+	; cartridge rather than sitting here with our palette and no frames.
+	; Inline rather than the check_commands macro: that one uses d6, which in
+	; this loop is the 160-byte line stride the blit relies on. d0 is free
+	; here -- the frame-counter read below overwrites it anyway.
+	move.l (LISTENER_ADDR), d0
+	cmp.l #REMOTE_RESET, d0
+	beq .reset
+
 	move.w FRAMECOUNT_ADDR, d0	; Frame counter published by the RP
 	cmp.w 2(a6), d0
  	beq.s .loop_low_st ; Counter unchanged: no new frame, wait for next VBL
@@ -456,6 +471,11 @@ start_rom_code:
 	dc.w 0						; after .overscan_flag to keep that offset.
 
 
+; Cold reset. Clearing memvalid/memval2/memval3 makes TOS treat this as a
+; power-on: it re-sizes RAM and reinitialises the shifter (palette, base,
+; resolution), the MFP, the IKBD and every vector we hijacked. Nothing has to
+; be restored by hand first. Runs from the copied block in ST RAM, and touches
+; no cartridge address while it waits, so the RP can be gone by then.
 .reset:
     move.l #PRE_RESET_WAIT, d6
 .wait_me:

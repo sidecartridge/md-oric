@@ -112,7 +112,8 @@ enum {
   ORIC_UI_MENU = 1,
   ORIC_UI_ROMLIST = 2,
   ORIC_UI_TAPELIST = 3,
-  ORIC_UI_STATUS = 4
+  ORIC_UI_STATUS = 4,
+  ORIC_UI_HELP = 5
 };
 
 
@@ -168,13 +169,20 @@ static void oric_core1_resume(void) {
   oric_c1_pause_req = false;
 }
 
-#define ORIC_MENU_ITEMS 5
+// "RETURN TO BOOSTER" sits second-to-last deliberately. The main menu wraps,
+// so the last entry is one UP press from the default selection -- not where a
+// one-way exit belongs.
+#define ORIC_MENU_ITEMS 7
 static const char* const oric_menu_items[ORIC_MENU_ITEMS] = {
-    "SELECT ROM", "SELECT TAPE", "EJECT TAPE", "STATUS", "RESUME"};
+    "SELECT ROM", "SELECT TAPE", "EJECT TAPE",       "STATUS",
+    "HELP",       "RETURN TO BOOSTER", "RESUME"};
 
 static volatile uint8_t oric_ui_state = ORIC_UI_EMULATING;
 static volatile bool oric_ui_redraw = false;
 static volatile uint8_t oric_menu_sel = 0;
+// ESC is a real Oric key. When the UI consumes a press, its release must be
+// swallowed too, or the Oric sees a release for a press it never received.
+static volatile bool oric_swallow_esc_up = false;
 
 #define ORIC_ATTR_NORMAL ORIC_OVL_ATTR(7, 0)  /* white on black */
 #define ORIC_ATTR_DIM ORIC_OVL_ATTR(6, 0)     /* cyan on black */
@@ -271,7 +279,7 @@ static void oric_menu_render(oric_t* sys) {
 
   const uint8_t sel = oric_menu_sel;
   for (int i = 0; i < ORIC_MENU_ITEMS; i++) {
-    const int row = 7 + i * 2;
+    const int row = 5 + i * 2;  // 7 entries: rows 5..17, clear of ROM/TAPE
     const uint8_t attr = (i == sel) ? ORIC_ATTR_HILITE : ORIC_ATTR_NORMAL;
     // Highlight the whole bar, not just the text, so the selection reads
     // clearly at 8x8 -- the cell attribute does the job a filled rect does
@@ -292,7 +300,7 @@ static void oric_menu_render(oric_t* sys) {
   oric_ovl_text(2, 21, line, ORIC_ATTR_DIM);
 
   oric_ovl_text(2, 24, "UP/DN  RET=SELECT", ORIC_ATTR_DIM);
-  oric_ovl_text(2, 25, "F1=CLOSE", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 25, "ESC=CLOSE", ORIC_ATTR_DIM);
   oric_ovl_present(sys);
 }
 
@@ -308,7 +316,7 @@ static void oric_list_render(oric_t* sys) {
       oric_ovl_text(1, 9, "Copy .tap or .wav files", ORIC_ATTR_NORMAL);
       oric_ovl_text(1, 10, "there, then reopen this", ORIC_ATTR_NORMAL);
       oric_ovl_text(1, 11, "menu.", ORIC_ATTR_NORMAL);
-      oric_ovl_text(1, 25, "F1=BACK", ORIC_ATTR_DIM);
+      oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
       oric_ovl_present(sys);
       return;
     }
@@ -323,7 +331,7 @@ static void oric_list_render(oric_t* sys) {
     oric_ovl_text(1, 14, "microfirmware documentation", ORIC_ATTR_NORMAL);
     oric_ovl_text(1, 15, "to find one:", ORIC_ATTR_NORMAL);
     oric_ovl_text(1, 17, "docs.sidecartridge.com", ORIC_ATTR_DIM);
-    oric_ovl_text(1, 25, "F1=BACK", ORIC_ATTR_DIM);
+    oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
     oric_ovl_present(sys);
     return;
   }
@@ -356,7 +364,7 @@ static void oric_list_render(oric_t* sys) {
                    oric_files_skipped);
     oric_ovl_text(2, 23, skip, ORIC_ATTR_DIM);
   }
-  oric_ovl_text(2, 25, "UP/DN  L/R=PAGE  F1=BACK", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 25, "UP/DN  L/R=PAGE  ESC=BACK", ORIC_ATTR_DIM);
   oric_ovl_present(sys);
 }
 
@@ -457,7 +465,7 @@ static void oric_select_rom(oric_t* sys, const char* name) {
     oric_ovl_text(1, 10, msg, ORIC_ATTR_DIM);
     oric_ovl_text(1, 12, "A BASIC ROM is 16384 bytes", ORIC_ATTR_NORMAL);
     oric_ovl_text(1, 13, "(16 KB).", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 25, "F1=BACK", ORIC_ATTR_DIM);
+    oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
     oric_ovl_present(sys);
     oric_core1_resume();
     return;  // rom.img is left untouched
@@ -473,7 +481,7 @@ static void oric_select_rom(oric_t* sys, const char* name) {
     oric_ovl_clear(ORIC_ATTR_NORMAL);
     oric_ovl_text(1, 8, msg, ORIC_ATTR_NORMAL);
     oric_ovl_text(1, 10, "Check the card is writable.", ORIC_ATTR_DIM);
-    oric_ovl_text(1, 25, "F1=BACK", ORIC_ATTR_DIM);
+    oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
     oric_ovl_present(sys);
     oric_core1_resume();
     return;  // stay on the list rather than dead-ending
@@ -526,7 +534,7 @@ static void oric_insert_tape(oric_t* sys, const char* name) {
     oric_ovl_clear(ORIC_ATTR_NORMAL);
     (void)snprintf(msg, sizeof(msg), "Cannot load %s", name);
     oric_ovl_text(1, 9, msg, ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 25, "F1=BACK", ORIC_ATTR_DIM);
+    oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
     oric_ovl_present(sys);
     return;  // stay on the list
   }
@@ -637,8 +645,89 @@ static void oric_status_render(oric_t* sys) {
   }
 
   oric_ovl_text(1, 24, "HOME shows timing without", ORIC_ATTR_DIM);
-  oric_ovl_text(1, 25, "opening this menu. F1=BACK", ORIC_ATTR_DIM);
+  oric_ovl_text(1, 25, "opening this menu. ESC=BACK", ORIC_ATTR_DIM);
   oric_ovl_present(sys);
+}
+
+// Leave the emulator for the Booster app.
+//
+// Not a direct jump. reset_jump_to_booster() is a raw VTOR + stack-pointer
+// swap and its own comment says it belongs at the top of main(), where
+// nothing is running yet. From here the cartridge PIO and DMA are live, the
+// DMA IRQ is enabled, Core 1 is executing our code rather than waiting in the
+// bootrom, and the clock is at 260 MHz -- Booster inherits all of that and
+// hangs. Tried; it does not come up.
+//
+// Instead do what md-testrom does, but through a full reset: point
+// BOOT_FEATURE away from this app and reboot. main() then runs gconfig_init,
+// sees the mismatch, and takes the Booster jump at the one place it is safe.
+// Same shutdown discipline as installing a ROM: blank the screen first, since
+// the ST holds its last page once the RP stops answering the bus.
+static void oric_return_to_booster(oric_t* sys) {
+  oric_core1_pause();
+
+  (void)settings_put_string(gconfig_getContext(), PARAM_BOOT_FEATURE,
+                            "BOOSTER");
+  (void)settings_save(gconfig_getContext(), true);
+
+  oric_ovl_clear(ORIC_ATTR_NORMAL);
+  oric_ovl_text(1, 10, "Returning to Booster...", ORIC_ATTR_NORMAL);
+  oric_ovl_present(sys);
+  sleep_ms(ORIC_REBOOT_MSG_MS);
+
+  oric_ovl_clear(ORIC_OVL_ATTR(0, 0));
+  oric_ovl_present(sys);
+  sleep_ms(ORIC_BLACK_FRAME_MS);  // let the m68k actually blit it
+
+  // Now ask the ST to cold-reset itself. The cart code polls this longword
+  // once per VBL, then waits ~1 s before jumping through the reset vector, so
+  // TOS scans the cartridge after Booster is back on the bus. Without this
+  // the ST stays in our copied loop with the Oric palette and no frames.
+  *((volatile uint32_t*)((uint8_t*)&__rom_in_ram_start__ + ATARI_ST_LISTENER_OFFSET)) =
+      _oric_as_m68k_long(ATARI_ST_REMOTE_RESET);
+  sleep_ms(100);  // several VBLs, so the m68k has seen it before we go
+
+  watchdog_reboot(0, 0, RESET_WATCHDOG_TIMEOUT);
+  while (1) {
+    tight_loop_contents();
+  }
+}
+
+// Read-only page: the keys and the two things people actually need to do.
+// Same shape as the status screen -- no selection, ESC out. Deliberately
+// lowercase-heavy: it is the screen most exposed to the descender glyphs.
+static void oric_help_render(oric_t* sys) {
+  oric_ovl_clear(ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 1, "HELP", ORIC_ATTR_NORMAL);
+
+  oric_ovl_text(2, 3, "Menu", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 4, "F1      open the menu", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 5, "ESC     back / close", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 6, "Up/Dn   move", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 7, "L/R     page a list", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 8, "Return  choose", ORIC_ATTR_NORMAL);
+
+  oric_ovl_text(2, 10, "Oric", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 11, "HELP    reset the Oric", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 12, "UNDO    break (NMI)", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 13, "HOME    show timing", ORIC_ATTR_NORMAL);
+
+  oric_ovl_text(2, 15, "Loading a tape", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 16, "F1, SELECT TAPE, pick a", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 17, "file, then type CLOAD\"\"", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 18, "at the BASIC prompt.", ORIC_ATTR_NORMAL);
+
+  oric_ovl_text(2, 20, "Changing the ROM", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 21, "F1, SELECT ROM, pick one.", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 22, "The emulator reboots.", ORIC_ATTR_NORMAL);
+
+  oric_ovl_text(2, 25, "ESC=BACK", ORIC_ATTR_DIM);
+  oric_ovl_present(sys);
+}
+
+static void oric_help_open(void) {
+  oric_ui_repaint();
+  oric_ui_state = ORIC_UI_HELP;
 }
 
 static void oric_status_open(void) {
@@ -684,6 +773,12 @@ static bool oric_menu_key(oric_t* sys, int code) {
           break;
         case 3:
           oric_status_open();
+          break;
+        case 4:
+          oric_help_open();
+          break;
+        case 5:
+          oric_return_to_booster(sys);
           break;
         case ORIC_MENU_ITEMS - 1:
           oric_menu_close(sys);
@@ -826,21 +921,30 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
 
   oric_t *sys = &state.oric;
 
-  // F1 owns the UI: it steps back one level, and opens the menu from the
-  // emulator.
+  // F1 opens the menu and nothing else. It deliberately does not close or go
+  // back -- ESC does that -- so the key that gets you in is not also the key
+  // that gets you out.
   if (code == 0x13A) {
+    if (oric_ui_state == ORIC_UI_EMULATING) {
+      oric_menu_open();
+    }
+    return;  // consumed either way; the Oric has no function keys
+  }
+
+  // ESC steps back one level. Only while a screen is open: with the menu
+  // closed it is an ordinary Oric key and must reach the machine untouched.
+  if (code == 0x1B && oric_ui_state != ORIC_UI_EMULATING) {
+    oric_swallow_esc_up = true;
     switch (oric_ui_state) {
       case ORIC_UI_ROMLIST:
       case ORIC_UI_TAPELIST:
       case ORIC_UI_STATUS:
+      case ORIC_UI_HELP:
         oric_ui_state = ORIC_UI_MENU;
         oric_ui_repaint();
         break;
-      case ORIC_UI_MENU:
-        oric_menu_close(sys);
-        break;
       default:
-        oric_menu_open();
+        oric_menu_close(sys);
         break;
     }
     return;
@@ -854,8 +958,8 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
     (void)oric_romlist_key(sys, code);
     return;
   }
-  if (oric_ui_state == ORIC_UI_STATUS) {
-    return;  // read-only screen; F1 above is the way out
+  if (oric_ui_state == ORIC_UI_STATUS || oric_ui_state == ORIC_UI_HELP) {
+    return;  // read-only screens; ESC above is the way out
   }
 
   switch (code) {
@@ -886,9 +990,15 @@ void __not_in_flash_func(kbd_raw_key_up)(int code) {
       code = toupper(code);
     }
   }
-  // Swallow releases while the menu is open, and the F1 release always --
+  // Swallow releases while a screen is open, and the F1 release always --
   // otherwise the Oric sees a release for a press it never got.
   if (oric_ui_state != ORIC_UI_EMULATING || code == 0x13A) {
+    return;
+  }
+  // An ESC that closed the last screen leaves the UI already back in
+  // EMULATING by the time its release arrives, so it needs its own flag.
+  if (code == 0x1B && oric_swallow_esc_up) {
+    oric_swallow_esc_up = false;
     return;
   }
   kbd_key_up(&state.oric.kbd, code);
@@ -932,6 +1042,8 @@ void __not_in_flash_func(core1_main()) {
             oric_list_render(&state.oric);
           } else if (oric_ui_state == ORIC_UI_STATUS) {
             oric_status_render(&state.oric);
+          } else if (oric_ui_state == ORIC_UI_HELP) {
+            oric_help_render(&state.oric);
           } else {
             oric_menu_render(&state.oric);
           }
@@ -1083,6 +1195,10 @@ int __not_in_flash_func(oric_main)() {
   }
 
   DPRINTF("Core 1 start\n");
+  // The region past the cart image is never zeroed, so make sure the ST does
+  // not read a leftover reset command on its first VBL.
+  *((volatile uint32_t*)((uint8_t*)&__rom_in_ram_start__ + ATARI_ST_LISTENER_OFFSET)) = 0;
+
   multicore_launch_core1(core1_main);
 
   uint32_t num_ticks = 19968;
