@@ -241,6 +241,23 @@ static bool oric_name_has_ext(const char* name, const char* ext) {
 
 // Runs on Core 0 from the key handler, not from the per-frame path: it blocks
 // on the SD card, so it must not sit inside the emulation or render loops.
+// Every spelling the Microdisc EPROM is shipped under. FatFs matches names
+// case-insensitively, so MICRODIS.ROM and microdis.rom are the same entry
+// here; only the stems need listing.
+static const char *const oric_microdisc_rom_names[] = {
+    ORIC_MICRODISC_ROM_NAME, ORIC_MICRODISC_ROM_ALT};
+
+// True for any of them, for the file scanner -- the EPROM is not a BASIC ROM
+// and must never be offered as one, or counted by the single-ROM auto-install.
+static bool oric_is_microdisc_rom(const char *name) {
+  for (size_t i = 0; i < CHIPS_ARRAY_SIZE(oric_microdisc_rom_names); i++) {
+    if (strcasecmp(name, oric_microdisc_rom_names[i]) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void oric_scan_files_ext(const char* ext) {
 
   DIR dir;
@@ -266,10 +283,10 @@ static void oric_scan_files_ext(const char* ext) {
     if (!oric_name_has_ext(info.fname, ext)) {
       continue;
     }
-    // The Microdisc EPROM shares the folder under a fixed name (D-17). It is
-    // not a BASIC ROM and must not be offered as one -- or counted as one by
-    // the single-ROM auto-install.
-    if (strcasecmp(info.fname, ORIC_MICRODISC_ROM_NAME) == 0) {
+    // The Microdisc EPROM shares the folder (D-17). It is not a BASIC ROM and
+    // must not be offered as one -- or counted as one by the single-ROM
+    // auto-install.
+    if (oric_is_microdisc_rom(info.fname)) {
       continue;
     }
     if (strlen(info.fname) >= ORIC_NAME_MAX) {
@@ -345,6 +362,15 @@ static void oric_menu_render(oric_t* sys) {
   oric_ovl_present(sys);
 }
 
+// The docs URL in full, for anyone who cannot scan the code. 86 characters
+// over three lines, broken at the path separators; the first and last are
+// exactly 30 columns, so they start at column 0 to fit the grid.
+static void oric_draw_docs_url(void) {
+  oric_ovl_text(0, 23, "https://docs.sidecartridge.com", ORIC_ATTR_DIM);
+  oric_ovl_text(0, 24, "/sidecartridge-multidevice", ORIC_ATTR_DIM);
+  oric_ovl_text(0, 25, "/microfirmwares/oric-emulator/", ORIC_ATTR_DIM);
+}
+
 static void oric_list_render(oric_t* sys) {
   const bool roms = (oric_ui_state == ORIC_UI_ROMLIST);
   const bool disks = (oric_ui_state == ORIC_UI_DISKLIST);
@@ -355,15 +381,22 @@ static void oric_list_render(oric_t* sys) {
   if (disks && !sys->md_present) {
     // The list is pointless without the controller, and the controller only
     // exists when its EPROM is on the card (D-17). Say so.
-    oric_ovl_text(1, 6, "No Microdisc EPROM found.", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 8, "Copy the 8 KB Microdisc", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 9, "ROM as", ORIC_ATTR_NORMAL);
-    oric_ovl_text(8, 9, ORIC_MICRODISC_ROM_NAME, ORIC_ATTR_DIM);
-    oric_ovl_text(1, 10, "into", ORIC_ATTR_NORMAL);
-    oric_ovl_text(6, 10, oric_folder_name(), ORIC_ATTR_DIM);
-    oric_ovl_text(1, 11, "and reset the emulator.", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
+    // Laid out like the missing-ROM screen: row 2 already carries the
+    // "SELECT DISK" heading, so this starts at 4.
+    char line[ORIC_OVL_COLS + 1];
+    oric_ovl_text(1, 4, "No Microdisc EPROM found.", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 6, "Copy the 8 KB ROM as", ORIC_ATTR_NORMAL);
+    (void)snprintf(line, sizeof(line), "%s or %s", ORIC_MICRODISC_ROM_NAME,
+                   ORIC_MICRODISC_ROM_ALT);
+    oric_ovl_text(1, 7, line, ORIC_ATTR_NORMAL);
+    (void)snprintf(line, sizeof(line), "into %s, then reset.",
+                   oric_folder_name());
+    oric_ovl_text(1, 8, line, ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 10, "Scan for the setup guide:", ORIC_ATTR_DIM);
+    oric_draw_docs_url();
+    oric_ovl_text(1, 27, "ESC=BACK", ORIC_ATTR_DIM);
     oric_ovl_present(sys);
+    oric_ovl_qr(sys, 90);
     return;
   }
 
@@ -389,18 +422,22 @@ static void oric_list_render(oric_t* sys) {
       return;
     }
     // Reachable now that nothing is embedded (D-07 superseded), so it has to
-    // say what to do rather than being an empty box.
-    oric_ovl_text(1, 6, "No BASIC ROM file found in", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 7, oric_folder_name(), ORIC_ATTR_DIM);
-    oric_ovl_text(1, 9, "Copy at least one .rom", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 10, "file there, then reopen", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 11, "this menu.", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 13, "Please read the", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 14, "microfirmware documentation", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 15, "to find one:", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 17, "docs.sidecartridge.com", ORIC_ATTR_DIM);
-    oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
+    // say what to do rather than being an empty box. The QR goes to the
+    // setup page, which is where a ROM actually comes from -- easier to
+    // follow on a phone than typing a long URL off a 40-column screen.
+    // Row 2 already carries the "SELECT ROM" heading, so this starts at 4.
+    oric_ovl_text(1, 4, "No BASIC ROM file found in", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 5, oric_folder_name(), ORIC_ATTR_DIM);
+    oric_ovl_text(1, 7, "Copy at least one .rom file", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 8, "there, then reopen this menu.", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 10, "Scan for the setup guide:", ORIC_ATTR_DIM);
+    oric_draw_docs_url();
+    oric_ovl_text(1, 27, "ESC=BACK", ORIC_ATTR_DIM);
     oric_ovl_present(sys);
+    // After present(): it rewrites whole scanlines, so the code goes on
+    // afterwards, between the prompt at row 10 (ends at line 87) and the
+    // URL at row 23 (starts at line 184).
+    oric_ovl_qr(sys, 90);
     return;
   }
 
@@ -1064,31 +1101,38 @@ oric_desc_t oric_desc(void) {
 // leaves the controller absent rather than booting garbage at $E000.
 static bool load_microdisc_rom_from_sd(void) {
   const char *folderName = oric_folder_name();
-  char path[256];
   size_t name_len = strlen(folderName);
   const char *sep =
       (name_len > 0 && folderName[name_len - 1] == '/') ? "" : "/";
-  int path_len = snprintf(path, sizeof(path), "%s%s%s", folderName, sep,
-                          ORIC_MICRODISC_ROM_NAME);
-  if (path_len <= 0 || (size_t)path_len >= sizeof(path)) {
-    return false;
+
+  for (size_t i = 0; i < CHIPS_ARRAY_SIZE(oric_microdisc_rom_names); i++) {
+    const char *romName = oric_microdisc_rom_names[i];
+    char path[256];
+    int path_len =
+        snprintf(path, sizeof(path), "%s%s%s", folderName, sep, romName);
+    if (path_len <= 0 || (size_t)path_len >= sizeof(path)) {
+      continue;
+    }
+    FIL file;
+    if (f_open(&file, path, FA_READ) != FR_OK) {
+      continue;  // try the next spelling
+    }
+    UINT bytes_read = 0;
+    FRESULT res = f_read(&file, oric_microdisc_rom, sizeof(oric_microdisc_rom),
+                         &bytes_read);
+    f_close(&file);
+    if (res != FR_OK || bytes_read != sizeof(oric_microdisc_rom)) {
+      // Found but unusable: say so rather than silently trying the next one,
+      // since a wrong-sized file is a mistake worth knowing about.
+      DPRINTF("oric: %s unusable (%d, %u bytes)\n", romName, (int)res,
+              (unsigned)bytes_read);
+      continue;
+    }
+    DPRINTF("oric: Microdisc EPROM loaded from %s\n", romName);
+    return true;
   }
-  FIL file;
-  if (f_open(&file, path, FA_READ) != FR_OK) {
-    DPRINTF("oric: no %s, Microdisc absent\n", ORIC_MICRODISC_ROM_NAME);
-    return false;
-  }
-  UINT bytes_read = 0;
-  FRESULT res =
-      f_read(&file, oric_microdisc_rom, sizeof(oric_microdisc_rom), &bytes_read);
-  f_close(&file);
-  if (res != FR_OK || bytes_read != sizeof(oric_microdisc_rom)) {
-    DPRINTF("oric: %s unusable (%d, %u bytes)\n", ORIC_MICRODISC_ROM_NAME,
-            (int)res, (unsigned)bytes_read);
-    return false;
-  }
-  DPRINTF("oric: Microdisc EPROM loaded\n");
-  return true;
+  DPRINTF("oric: no Microdisc EPROM found, controller absent\n");
+  return false;
 }
 
 void app_init(void) {
