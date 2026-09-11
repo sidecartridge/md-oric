@@ -22,9 +22,26 @@ static bool resetDeviceAtBoot = true;
 // oric.c; Core 1 paces on it.
 volatile uint32_t __not_in_flash() emul_blitDoneCount = 0;
 
+// How often to look for a card once the Atari has been sent back to GEM.
+#define SDCARD_RETRY_MS 500
+
 void emul_start() {
   // Copy the target firmware to RAM so the remote machine can execute it.
-  COPY_FIRMWARE_TO_RAM((uint16_t *)target_firmware, target_firmware_length * 4);
+  // The macro's length is in bytes; target_firmware_length counts uint16_t
+  // entries. Asking for length * 4 copied twice the image -- 1360 bytes of
+  // cart code plus 1360 bytes of whatever follows it in flash, landing on
+  // everything from offset 1360 up, the listener longword at $05F8 included.
+  COPY_FIRMWARE_TO_RAM((uint16_t *)target_firmware,
+                       target_firmware_length * sizeof(target_firmware[0]));
+
+  // Tell the cartridge code it may run. Written before romemul starts
+  // serving the bus, so the Atari can never read an uninitialised value
+  // here; the SD check below sets it to NO_SDCARD if there is nothing to
+  // load, long before the Atari gets as far as reading it.
+  volatile uint16_t *bootStatus =
+      (volatile uint16_t *)((uint8_t *)&__rom_in_ram_start__ +
+                            ATARI_ST_BOOTSTATUS_OFFSET);
+  *bootStatus = ATARI_ST_BOOT_OK;
 
   // ROM4 serves the cartridge image and framebuffers; nothing on the RP
   // needs to see those reads, so no DMA interrupt is installed at all.
@@ -52,13 +69,19 @@ void emul_start() {
   }
   int sdcardErr = sdcard_initFilesystem(&fsys, folderName);
   if (sdcardErr != SDCARD_INIT_OK) {
+    // No card means no ROM, so there is nothing to emulate. Tell the
+    // cartridge code, which says so and hands back to GEM. Then keep
+    // looking, so that inserting a card and resetting the Atari works
+    // without power-cycling the board as well.
     DPRINTF("Error initializing the SD card: %i\n", sdcardErr);
-    while (1) {
-      sleep_ms(SLEEP_LOOP_MS);
+    *bootStatus = ATARI_ST_BOOT_NO_SDCARD;
+    while (sdcardErr != SDCARD_INIT_OK) {
+      sleep_ms(SDCARD_RETRY_MS);
+      sdcardErr = sdcard_initFilesystem(&fsys, folderName);
     }
-  } else {
-    DPRINTF("SD card found & initialized\n");
+    *bootStatus = ATARI_ST_BOOT_OK;
   }
+  DPRINTF("SD card found & initialized\n");
 
   // Start the Oric emulation loop.
   DPRINTF("Start the app loop here\n");
