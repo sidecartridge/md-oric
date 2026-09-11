@@ -21,6 +21,16 @@
 - The upstream Disk II controller (an Apple II part) is removed.
 
 ### Fixed
+- Keystrokes were lost and keys could stick down. The Atari ST now forwards
+  IKBD bytes from the keyboard ACIA's own interrupt instead of polling them
+  from a timer that stops during the vertical blank, the RP captures them
+  through a DMA ring rather than a per-read interrupt that could overwrite
+  itself, and a key is released with the same code it was pressed with.
+- ESC now reaches the Oric; it was translated correctly but never registered
+  on the emulated keyboard matrix.
+- A reset rewinds the inserted tape instead of quietly forgetting it, so
+  `CLOAD""` works after a reset. Reset from the menu is a power cycle, which
+  also clears anything a disk DOS hooked into page 2.
 - The 6522 model kept its IRQ line asserted after an enable was cleared with
   the flag pending; software that masks the VIA around disk transfers hung.
 - RAM under the ROM now has a power-on pattern instead of zeros; Sedoric's
