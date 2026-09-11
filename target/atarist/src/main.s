@@ -456,6 +456,15 @@ start_rom_code:
 	move.l #(SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.timerb_overscan - ROM4_ADDR)),$120.w ; Timer B interrupt vector
 	move.b	#(TIMERB_COUNT_SCAN_LINES - 1),$fffffa21.w  ; Timer B data (number of scanlines to next interrupt)
 	move.b	#TIMERB_EVENT_COUNT,$fffffa1b.w			    ; Timer B control (event mode (HBL))	
+	; Hold off the keyboard for the ~9 scanlines before the border trick.
+	; Every MFP source is level 6, so the 68000 masks Timer B for as long as
+	; the ACIA handler runs -- and .timerb_overscan has to hit its cycle
+	; exactly or the shifter loses lock and the frame comes out black. We are
+	; inside a Timer B interrupt here, so no ACIA handler can be running;
+	; masking now guarantees none starts before the trick. Nothing is lost:
+	; the 6850 holds a byte, the IKBD sends one per 1.28 ms, and a masked
+	; interrupt stays pending in IPRB and fires the moment it is unmasked.
+	bclr #6,$fffffa15.w      ; Interrupt Mask B: GPIP4 (ACIA) off
 	bra.s .no_overscan
 
 .timerb_overscan:
@@ -469,13 +478,13 @@ start_rom_code:
 	endr
 	move.b	#2,$ffff820a.w	; LineCycles=500-508
 
-	; Keep polling the keyboard through the bottom border and the vertical
-	; blank. This used to stop Timer B here until the VBL re-armed it, which
-	; left ~4 ms per frame with nobody reading the ACIA: the IKBD delivers a
-	; byte every 1.28 ms in a burst and the ACIA buffers two, so a fast roll
-	; overran it and a key event -- often a release -- was lost.
-	move.l #(SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.timerb_routine - ROM4_ADDR)),$120.w
-	move.b	#TIMERB_COUNT_SCAN_LINES,$fffffa21.w
+	; The trick is done, so let the keyboard back in.
+	bset #6,$fffffa15.w      ; Interrupt Mask B: GPIP4 (ACIA) on
+	; Timer B has nothing left to do this frame -- the VBL handler re-arms
+	; it. It used to be left running here to keep polling the keyboard, which
+	; the ACIA interrupt now does; leaving it on only added interrupts
+	; through the opened border.
+	clr.b $fffffa1b.w		   ; Stop Timer B
 	bclr    #0, $fffffa0f      ; tell ST interrupt is done
 	rte
 
