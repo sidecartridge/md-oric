@@ -152,7 +152,7 @@ static inline uint32_t _oric_as_m68k_long(uint32_t v) {
   (ATARI_ST_FRAMEBUFFERS_OFFSET + ATARI_ST_FRAMEBUFFER_SIZE_BYTES)
 // SAFEGUARD END
 
-// Names accepted for the Microdisc EPROM in the content folder (D-17). The
+// Names accepted for the Microdisc EPROM in the content folder. The
 // ROM picker skips them; the file's presence is what makes the controller
 // exist. Two spellings because the copies in circulation disagree: our docs
 // say microdisc.rom, while Oricutron and the MiSTer core ship the 8.3 name
@@ -207,7 +207,7 @@ typedef struct {
 
   oric_td_t td;  // Tape drive
 
-  // Microdisc floppy controller (EPIC-07). md_present is false when no
+  // Microdisc floppy controller. md_present is false when no
   // microdisc.rom was found; the registers then read as they did before.
   bool md_present;
   oric_wd17xx_t wd;
@@ -398,7 +398,7 @@ void oric_init(oric_t* sys, const oric_desc_t* desc) {
     oric_td_init(&sys->td);
   }
 
-  // Microdisc, present only with its EPROM (D-17)
+  // Microdisc, present only with its EPROM
   sys->md_present = desc->roms.microdisc_rom.ptr &&
                     (desc->roms.microdisc_rom.size == ORIC_MD_ROM_BYTES) &&
                     desc->overlay_ram && desc->md_track;
@@ -445,9 +445,9 @@ void oric_reset(oric_t* sys) {
     oric_td_reset(&sys->td);
   }
   // Microdisc: a real one holds ROMDIS at power-on so its EPROM boots the
-  // machine -- and with no disk in the drive it then just sits there. D-17:
-  // assert ROMDIS only when a disk is inserted, so a disk-less power-on still
-  // lands in BASIC exactly as before.
+  // machine -- and with no disk in the drive it then just sits there, which
+  // would be a regression for everyone using tapes. So assert ROMDIS only
+  // when a disk is inserted: a disk-less power-on still lands in BASIC.
   microdisc_init(&sys->md, &sys->wd);
   sys->wd.disk[0] = &sys->disk;
   sys->md.romdis = sys->md_present && sys->disk.inserted;

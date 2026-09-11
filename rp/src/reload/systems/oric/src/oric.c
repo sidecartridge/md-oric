@@ -86,9 +86,9 @@ uint16_t oric_via_queue_head;
 static volatile uint32_t oric_msg_until_us;
 static char oric_msg_buf[32];
 
-// EPIC-03 STORY-01: cost of oric_screen_update, sampled on Core 1 and read on
-// Core 0 when the stats key is pressed. Scalars, so volatile is enough to stop
-// the compiler caching them across the loop (D-13); the barrier before reading
+// Cost of oric_screen_update, sampled on Core 1 and read on Core 0 when the
+// stats key is pressed. Scalars, so volatile is enough to stop the compiler
+// caching them across the loop; the barrier before reading
 // keeps the four consistent with each other.
 static volatile uint32_t oric_cvt_min_us = 0xFFFFFFFFu;
 static volatile uint32_t oric_cvt_max_us = 0;
@@ -99,11 +99,13 @@ static volatile uint32_t oric_cvt_count = 0;
 // On-screen menu. Dispatcher shape follows md-gpu-demo's demo_menu.c: one key
 // owned for entering/leaving, everything else forwarded to whatever is active.
 // Here the owned key is F1 rather than ESC -- ESC is a real Oric key, whereas
-// the Oric has no function keys, so F1 is free (D-15, D-16).
+// the Oric has no function keys, so F1 is free.
 //
 // State is written on Core 0 (the key handler) and read on Core 1 (the
-// renderer), so it follows D-13: writer fills the payload, __dmb(), then
-// raises the flag; reader tests the flag, __dmb(), then reads the payload.
+// renderer), so it follows the rule every cross-core signal here follows:
+// writer fills the payload, __dmb(), then raises the flag; reader tests the
+// flag, __dmb(), then reads the payload. Without the pair the compiler is
+// free to cache the payload in a register and never see the update.
 // ---------------------------------------------------------------------------
 enum {
   ORIC_UI_EMULATING = 0,
@@ -283,7 +285,7 @@ static void oric_scan_files_ext(const char* ext) {
     if (!oric_name_has_ext(info.fname, ext)) {
       continue;
     }
-    // The Microdisc EPROM shares the folder (D-17). It is not a BASIC ROM and
+    // The Microdisc EPROM shares the folder. It is not a BASIC ROM and
     // must not be offered as one -- or counted as one by the single-ROM
     // auto-install.
     if (oric_is_microdisc_rom(info.fname)) {
@@ -380,7 +382,7 @@ static void oric_list_render(oric_t* sys) {
 
   if (disks && !sys->md_present) {
     // The list is pointless without the controller, and the controller only
-    // exists when its EPROM is on the card (D-17). Say so.
+    // exists when its EPROM is on the card. Say so.
     // Laid out like the missing-ROM screen: row 2 already carries the
     // "SELECT DISK" heading, so this starts at 4.
     char line[ORIC_OVL_COLS + 1];
@@ -421,7 +423,7 @@ static void oric_list_render(oric_t* sys) {
       oric_ovl_present(sys);
       return;
     }
-    // Reachable now that nothing is embedded (D-07 superseded), so it has to
+    // Reachable, since no ROM is embedded in the binary, so it has to
     // say what to do rather than being an empty box. The QR goes to the
     // setup page, which is where a ROM actually comes from -- easier to
     // follow on a phone than typing a long URL off a 40-column screen.
@@ -679,7 +681,7 @@ static void oric_disklist_open(void) {
 
 // Insert a disk and boot it. A real Microdisc boots whatever is in the drive
 // at power-on, so inserting from the menu resets the Oric with ROMDIS
-// asserted (D-17) -- the EPROM then loads the boot sector.
+// asserted -- the EPROM then loads the boot sector.
 static void oric_insert_disk(oric_t* sys, const char* name) {
   char msg[ORIC_OVL_COLS + 1];
   const char* folder = oric_folder_name();
@@ -971,7 +973,7 @@ static bool oric_menu_key(oric_t* sys, int code) {
         case 5:
           // A power cycle, not the HELP key's soft reset: RAM is cleared, so
           // nothing a DOS hooked into page 2 survives once its disk is out.
-          // With a disk inserted this reboots the disk (D-17); without one
+          // With a disk inserted this reboots the disk; without one
           // it lands in a freshly started BASIC.
           oric_ui_state = ORIC_UI_EMULATING;
           sys->screen_dirty = true;
@@ -1016,7 +1018,7 @@ static volatile uint32_t oric_boot_hint_until_us;
 #define ORIC_FRAME_FALLBACK_US 25000u
 
 // Payload then flag, always: Core 1 keys off the deadline, so the text must be
-// complete and visible before the deadline is raised (D-13).
+// complete and visible before the deadline is raised.
 static void oric_publish_msg(void) {
   __dmb();
   oric_msg_until_us = time_us_32() + (ORIC_MSG_DISPLAY_SECONDS * 1000u * 1000u);
@@ -1065,7 +1067,7 @@ __attribute__((aligned(4))) oric_rom[ORIC_ROM_SIZE] = {0};
 
 // Microdisc: the 16 KB of RAM under the BASIC ROM (Sedoric lives there), the
 // 8 KB EPROM read from microdisc.rom, and the one resident disk track. Together
-// ~31 KB, which is nearly all of what ORIC_RAM had left (EPIC-07 memory plan).
+// ~31 KB, which is nearly all of what ORIC_RAM had left.
 static uint8_t __attribute__((section(".oric_ram")))
 __attribute__((aligned(4))) oric_overlay_ram[0x4000];
 static uint8_t __attribute__((section(".oric_ram")))
@@ -1086,7 +1088,7 @@ oric_desc_t oric_desc(void) {
       .roms =
           {
               .rom = {.ptr = oric_rom, .size = sizeof(oric_rom)},
-              // Size 0 means no Microdisc: the controller stays absent (D-17).
+              // Size 0 means no Microdisc: the controller stays absent.
               .microdisc_rom = {.ptr = oric_microdisc_rom,
                                 .size = oric_microdisc_rom_loaded
                                             ? sizeof(oric_microdisc_rom)
@@ -1283,7 +1285,7 @@ void __not_in_flash_func(core1_main()) {
     uint32_t now_us = time_us_32();
     // Pace on the m68k's "blit finished" signal rather than free-running, so a
     // frame is never started while the ST is still reading the buffer it would
-    // land in, and Core 1 stops drifting against the ST's VBL (D-12, D-10).
+    // land in, and Core 1 stops drifting against the ST's VBL.
     // The timeout is the safety net: the m68k stops signalling whenever the ST
     // is reset or running anything but the blit loop, and a Core 1 that waited
     // forever would be a dead display with no obvious cause.
