@@ -27,9 +27,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "chips/chips_common.h"
-#include "images/oric_images.h"
 #include "pico/stdlib.h"
 #ifdef OLIMEX_NEO6502
 #include "chips/wdc65C02cpu.h"
@@ -42,9 +42,6 @@
 #include "chips/mem.h"
 #include "chips/mos6522via.h"
 #include "debug.h"
-#include "devices/disk2_fdc.h"
-#include "devices/disk2_fdd.h"
-#include "devices/oric_fdc_rom.h"
 #include "devices/oric_td.h"
 #include "emul.h"
 #include "hardware/clocks.h"
@@ -239,6 +236,12 @@ static void oric_scan_files_ext(const char* ext) {
       continue;
     }
     if (!oric_name_has_ext(info.fname, ext)) {
+      continue;
+    }
+    // The Microdisc EPROM shares the folder under a fixed name (D-17). It is
+    // not a BASIC ROM and must not be offered as one -- or counted as one by
+    // the single-ROM auto-install.
+    if (strcasecmp(info.fname, ORIC_MICRODISC_ROM_NAME) == 0) {
       continue;
     }
     if (strlen(info.fname) >= ORIC_NAME_MAX) {
@@ -616,6 +619,12 @@ static void oric_status_render(oric_t* sys) {
   (void)snprintf(line, sizeof(line), "TAPE: %s",
                  oric_tape_name[0] ? oric_tape_name : "(none)");
   oric_ovl_text(2, 7, line, ORIC_ATTR_NORMAL);
+  // The Microdisc EPROM is deliberately hidden from the ROM picker, so this
+  // is the one place that says whether microdisc.rom was found.
+  oric_ovl_text(2, 8,
+                sys->md_present ? "DISK: Microdisc, no disk"
+                                : "DISK: no " ORIC_MICRODISC_ROM_NAME,
+                sys->md_present ? ORIC_ATTR_NORMAL : ORIC_ATTR_DIM);
 
   // Conversion timing. Nothing is converted while this screen is up -- Core 1
   // is rendering the menu, not the Oric screen -- so the numbers are a stable
@@ -849,11 +858,21 @@ static inline void flash_set_baud_div(uint16_t div) {
 uint8_t __attribute__((section(".oric_ram")))
 __attribute__((aligned(4))) oric_rom[ORIC_ROM_SIZE] = {0};
 
+// Microdisc: the 16 KB of RAM under the BASIC ROM (Sedoric lives there), the
+// 8 KB EPROM read from microdisc.rom, and the one resident disk track. Together
+// ~31 KB, which is nearly all of what ORIC_RAM had left (EPIC-07 memory plan).
+static uint8_t __attribute__((section(".oric_ram")))
+__attribute__((aligned(4))) oric_overlay_ram[0x4000];
+static uint8_t __attribute__((section(".oric_ram")))
+__attribute__((aligned(4))) oric_microdisc_rom[ORIC_MD_ROM_BYTES];
+static uint8_t __attribute__((section(".oric_ram")))
+__attribute__((aligned(4))) oric_md_track[ORIC_MD_TRACK_BYTES];
+static bool oric_microdisc_rom_loaded = false;
+
 // Get oric_desc_t struct based on joystick type
 oric_desc_t oric_desc(void) {
   return (oric_desc_t){
       .td_enabled = true,
-      .fdc_enabled = true,
       .audio =
           {
               .callback = {.func = NULL},
@@ -862,9 +881,46 @@ oric_desc_t oric_desc(void) {
       .roms =
           {
               .rom = {.ptr = oric_rom, .size = sizeof(oric_rom)},
-              .boot_rom = {.ptr = oric_fdc_rom, .size = sizeof(oric_fdc_rom)},
+              // Size 0 means no Microdisc: the controller stays absent (D-17).
+              .microdisc_rom = {.ptr = oric_microdisc_rom,
+                                .size = oric_microdisc_rom_loaded
+                                            ? sizeof(oric_microdisc_rom)
+                                            : 0},
           },
+      .overlay_ram = oric_overlay_ram,
+      .md_track = oric_md_track,
   };
+}
+
+// The Microdisc EPROM is optional and must be exactly 8 KB. Anything else
+// leaves the controller absent rather than booting garbage at $E000.
+static bool load_microdisc_rom_from_sd(void) {
+  const char *folderName = oric_folder_name();
+  char path[256];
+  size_t name_len = strlen(folderName);
+  const char *sep =
+      (name_len > 0 && folderName[name_len - 1] == '/') ? "" : "/";
+  int path_len = snprintf(path, sizeof(path), "%s%s%s", folderName, sep,
+                          ORIC_MICRODISC_ROM_NAME);
+  if (path_len <= 0 || (size_t)path_len >= sizeof(path)) {
+    return false;
+  }
+  FIL file;
+  if (f_open(&file, path, FA_READ) != FR_OK) {
+    DPRINTF("oric: no %s, Microdisc absent\n", ORIC_MICRODISC_ROM_NAME);
+    return false;
+  }
+  UINT bytes_read = 0;
+  FRESULT res =
+      f_read(&file, oric_microdisc_rom, sizeof(oric_microdisc_rom), &bytes_read);
+  f_close(&file);
+  if (res != FR_OK || bytes_read != sizeof(oric_microdisc_rom)) {
+    DPRINTF("oric: %s unusable (%d, %u bytes)\n", ORIC_MICRODISC_ROM_NAME,
+            (int)res, (unsigned)bytes_read);
+    return false;
+  }
+  DPRINTF("oric: Microdisc EPROM loaded\n");
+  return true;
 }
 
 void app_init(void) {
@@ -1124,6 +1180,7 @@ int __not_in_flash_func(oric_main)() {
   // Erase the ROM area in RAM
   memset((void *)&__oric_rom_in_ram_start__, 0, 32 * 1024 * sizeof(uint8_t));
   int rom_load_result = load_oric_rom_from_sd("rom.img");
+  oric_microdisc_rom_loaded = load_microdisc_rom_from_sd();
 
   // SAFEGUARD START: Init translation table for Oric
   kbdmap_initOric();

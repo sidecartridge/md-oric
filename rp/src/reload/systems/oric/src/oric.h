@@ -27,10 +27,8 @@
 // - chips/kbd.h
 // - chips/mem.h
 // - chips/clk.h
-// - systems/oric_fdd.h
-// - systems/oric_fdc.h
-// - systems/oric_fdc_rom.h
-// - systems/oric_td.h
+// - devices/oric_microdisc.h
+// - devices/oric_td.h
 //
 // ## The Oric
 //
@@ -74,7 +72,7 @@
 #include "chips/mem.h"
 #include "chips/mos6522via.h"
 #include "constants.h"
-#include "devices/disk2_fdc.h"
+#include "devices/oric_microdisc.h"
 #include "devices/oric_td.h"
 
 #ifdef __cplusplus
@@ -144,16 +142,21 @@ static inline uint32_t _oric_as_m68k_long(uint32_t v) {
   (ATARI_ST_FRAMEBUFFERS_OFFSET + ATARI_ST_FRAMEBUFFER_SIZE_BYTES)
 // SAFEGUARD END
 
+// The Microdisc EPROM's fixed name in the content folder (D-17). The ROM
+// picker skips it; its presence is what makes the controller exist.
+#define ORIC_MICRODISC_ROM_NAME "microdisc.rom"
+
 // Config parameters for oric_init()
 typedef struct {
-  bool td_enabled;   // Set to true to enable tape drive emulation
-  bool fdc_enabled;  // Set to true to enable floppy disk controller emulation
+  bool td_enabled;      // Set to true to enable tape drive emulation
   chips_debug_t debug;  // Optional debugging hook
   chips_audio_desc_t audio;
   struct {
     chips_range_t rom;
-    chips_range_t boot_rom;
+    chips_range_t microdisc_rom;  // 8 KB; size 0 = no Microdisc fitted
   } roms;
+  uint8_t* overlay_ram;  // 16 KB under the BASIC ROM, used while ROMDIS
+  uint8_t* md_track;     // ORIC_MD_TRACK_BYTES, the one resident disk track
 } oric_desc_t;
 
 // Oric emulator state
@@ -170,7 +173,6 @@ typedef struct {
 
   uint8_t ram[0xC000];
   uint8_t* rom;
-  uint8_t* boot_rom;
 
   int blink_counter;
   uint8_t pattr;
@@ -184,11 +186,16 @@ typedef struct {
 
   volatile bool screen_dirty;
 
-  uint16_t extension;
-
   oric_td_t td;  // Tape drive
 
-  disk2_fdc_t fdc;  // Disk II floppy disk controller
+  // Microdisc floppy controller (EPIC-07). md_present is false when no
+  // microdisc.rom was found; the registers then read as they did before.
+  bool md_present;
+  oric_wd17xx_t wd;
+  oric_microdisc_t md;
+  oric_diskimage_t disk;
+  uint8_t* overlay_ram;
+  const uint8_t* md_rom;
 
   uint32_t system_ticks;
 
@@ -276,6 +283,25 @@ static uint8_t oric_glyph_row(char c, int row);
 #define LATTR_DSIZE (0x02)
 #define LATTR_BLINK (0x04)
 
+// Apply the Microdisc's ROMDIS / EPROM lines to the page table. Upstream
+// tests the flags on every access (machine.c microdisc_atmosread/write); here
+// the map changes only when a $314 write flips them, which is rare.
+//   romdis clear : $C000-$FFFF is the BASIC ROM, writes dropped
+//   romdis set   : $C000-$FFFF is overlay RAM, except that while diskrom is
+//                  set the EPROM reads at $E000-$FFFF (writes there dropped)
+static void _oric_md_remap(oric_t* sys) {
+  if (!sys->md_present || !sys->md.romdis) {
+    mem_map_rom(&sys->mem, 0, 0xC000, 0x4000, sys->rom);
+    return;
+  }
+  mem_map_ram(&sys->mem, 0, 0xC000, 0x2000, sys->overlay_ram);
+  if (sys->md.diskrom) {
+    mem_map_rom(&sys->mem, 0, 0xE000, 0x2000, sys->md_rom);
+  } else {
+    mem_map_ram(&sys->mem, 0, 0xE000, 0x2000, sys->overlay_ram + 0x2000);
+  }
+}
+
 void oric_init(oric_t* sys, const oric_desc_t* desc) {
   CHIPS_ASSERT(sys && desc);
   if (desc->debug.callback.func) {
@@ -292,9 +318,7 @@ void oric_init(oric_t* sys, const oric_desc_t* desc) {
   sys->audio_callback = desc->audio.callback;
 
   CHIPS_ASSERT(desc->roms.rom.ptr && (desc->roms.rom.size == 0x4000));
-  CHIPS_ASSERT(desc->roms.boot_rom.ptr && (desc->roms.boot_rom.size == 0x200));
   sys->rom = desc->roms.rom.ptr;
-  sys->boot_rom = desc->roms.boot_rom.ptr;
 
   MOS6502CPU_INIT(&sys->cpu, &(MOS6502CPU_DESC_T){0});
 
@@ -313,27 +337,34 @@ void oric_init(oric_t* sys, const oric_desc_t* desc) {
   sys->blink_counter = 0;
   sys->pattr = 0;
 
-  sys->extension = 0;
-
   // Optionally setup tape drive
   if (desc->td_enabled) {
     oric_td_init(&sys->td);
   }
 
-  // Optionally setup floppy disk controller
-  if (desc->fdc_enabled) {
-    disk2_fdc_init(&sys->fdc);
-    if (CHIPS_ARRAY_SIZE(oric_nib_images) > 0) {
-      disk2_fdd_insert_disk(&sys->fdc.fdd[0], oric_nib_images[0]);
-    }
+  // Microdisc, present only with its EPROM (D-17)
+  sys->md_present = desc->roms.microdisc_rom.ptr &&
+                    (desc->roms.microdisc_rom.size == ORIC_MD_ROM_BYTES) &&
+                    desc->overlay_ram && desc->md_track;
+  sys->md_rom = desc->roms.microdisc_rom.ptr;
+  sys->overlay_ram = desc->overlay_ram;
+  memset(&sys->disk, 0, sizeof(sys->disk));
+  sys->disk.track = desc->md_track;
+  sys->disk.buf_track = -1;
+  sys->disk.buf_side = -1;
+  sys->disk.cachedtrack = -1;
+  sys->disk.cachedside = -1;
+  microdisc_init(&sys->md, &sys->wd);
+  sys->wd.disk[0] = &sys->disk;
+  if (sys->md_present) {
+    memset(sys->overlay_ram, 0, 0x4000);
   }
+  _oric_md_remap(sys);
 }
 
 void oric_discard(oric_t* sys) {
   CHIPS_ASSERT(sys && sys->valid);
-  if (sys->fdc.valid) {
-    disk2_fdc_discard(&sys->fdc);
-  }
+  diskimage_close(&sys->disk);
   if (sys->td.valid) {
     oric_td_discard(&sys->td);
   }
@@ -349,12 +380,17 @@ void oric_reset(oric_t* sys) {
   CHIPS_ASSERT(sys && sys->valid);
   mos6522via_reset(&sys->via);
   ay38910psg_reset(&sys->psg);
-  if (sys->fdc.valid) {
-    disk2_fdc_reset(&sys->fdc);
-  }
   if (sys->td.valid) {
     oric_td_reset(&sys->td);
   }
+  // Microdisc: a real one holds ROMDIS at power-on so its EPROM boots the
+  // machine -- and with no disk in the drive it then just sits there. D-17:
+  // assert ROMDIS only when a disk is inserted, so a disk-less power-on still
+  // lands in BASIC exactly as before.
+  microdisc_init(&sys->md, &sys->wd);
+  sys->wd.disk[0] = &sys->disk;
+  sys->md.romdis = sys->md_present && sys->disk.inserted;
+  _oric_md_remap(sys);
   MOS6502CPU_RESET(&sys->cpu);
 }
 
@@ -369,58 +405,27 @@ static void __not_in_flash_func(_oric_mem_rw)(oric_t* sys, uint16_t addr,
         mos6522via_write(&sys->via, addr & 0xF, MOS6502CPU_GET_DATA(&sys->cpu));
       }
     } else if ((addr >= 0x0310) && (addr <= 0x031F)) {
-      if (sys->fdc.valid) {
-        // Disk II FDC
+      // Microdisc: $310-$313 WD1793, $314 control/status, $318 DRQ. The
+      // rest of the range is the VIA again, as upstream's default branch
+      // did. A $314 write can move ROMDIS / the EPROM, so remap after it.
+      if (sys->md_present && (addr < 0x0315 || addr == 0x0318)) {
         if (rw) {
-          // Memory read
-          MOS6502CPU_SET_DATA(&sys->cpu,
-                              disk2_fdc_read_byte(&sys->fdc, addr & 0xF));
+          MOS6502CPU_SET_DATA(&sys->cpu, microdisc_read(&sys->md, addr));
         } else {
-          // Memory write
-          disk2_fdc_write_byte(&sys->fdc, addr & 0xF,
-                               MOS6502CPU_GET_DATA(&sys->cpu));
+          const bool romdis = sys->md.romdis;
+          const bool diskrom = sys->md.diskrom;
+          microdisc_write(&sys->md, addr, MOS6502CPU_GET_DATA(&sys->cpu));
+          if (romdis != sys->md.romdis || diskrom != sys->md.diskrom) {
+            _oric_md_remap(sys);
+          }
         }
-      } else {
+      } else if (sys->md_present) {
         if (rw) {
-          MOS6502CPU_SET_DATA(&sys->cpu, 0x00);
-        }
-      }
-    } else if ((addr >= 0x0320) && (addr <= 0x03FF)) {
-      if (sys->fdc.valid) {
-        // Disk II boot rom
-        if (rw) {
-          // Memory read
           MOS6502CPU_SET_DATA(&sys->cpu,
-                              sys->boot_rom[(addr & 0xFF) + sys->extension]);
+                              mos6522via_read(&sys->via, addr & 0xF));
         } else {
-          // SAFEGUARD START: commented out memory mapping switch for the
-          // overlay RAM Memory write switch (addr) {
-          //   case 0x380:
-          //     mem_map_rw(&sys->mem, 0, 0xC000, 0x4000, sys->rom,
-          //                sys->overlay_ram);
-          //     sys->extension = 0;
-          //     break;
-
-          //   case 0x381:
-          //     mem_map_ram(&sys->mem, 0, 0xC000, 0x4000, sys->overlay_ram);
-          //     sys->extension = 0;
-          //     break;
-
-          //   case 0x382:
-          //     mem_map_rw(&sys->mem, 0, 0xC000, 0x4000, sys->rom,
-          //                sys->overlay_ram);
-          //     sys->extension = 0x100;
-          //     break;
-
-          //   case 0x383:
-          //     mem_map_ram(&sys->mem, 0, 0xC000, 0x4000, sys->overlay_ram);
-          //     sys->extension = 0x100;
-          //     break;
-
-          //   default:
-          //     break;
-          // }
-          // SAFEGUARD END
+          mos6522via_write(&sys->via, addr & 0xF,
+                           MOS6502CPU_GET_DATA(&sys->cpu));
         }
       } else {
         if (rw) {
@@ -451,14 +456,16 @@ void __not_in_flash_func(oric_tick)(oric_t* sys) {
 
   _oric_mem_rw(sys, sys->cpu.addr, sys->cpu.rw);
 
-  // Tick FDC
-  if (sys->fdc.valid && (sys->system_ticks & 127) == 0) {
-    disk2_fdc_tick(&sys->fdc);
+  // WD1793 delayed INTRQ / DRQ. Only the two counters are touched per cycle;
+  // the command state machine runs on register access.
+  if (sys->wd.delayedint > 0 || sys->wd.delayeddrq > 0) {
+    wd17xx_ticktock(&sys->wd, 1);
   }
 
-  // Tick VIA
+  // Tick VIA. The Microdisc's IRQ (already gated by INTENA) shares the line.
   if ((sys->system_ticks & 3) == 0) {
-    MOS6502CPU_SET_IRQ(&sys->cpu, mos6522via_tick(&sys->via, 4));
+    MOS6502CPU_SET_IRQ(&sys->cpu,
+                       mos6522via_tick(&sys->via, 4) || sys->md.irq);
 
     // Update PSG state
     if (mos6522via_get_cb2(&sys->via)) {
@@ -966,7 +973,6 @@ uint32_t oric_save_snapshot(oric_t* sys, oric_t* dst) {
   // m6502_snapshot_onsave(&dst->cpu);
   ay38910psg_snapshot_onsave(&dst->psg);
   oric_td_snapshot_onsave(&dst->td);
-  disk2_fdc_snapshot_onsave(&dst->fdc);
   mem_snapshot_onsave(&dst->mem, sys);
   return ORIC_SNAPSHOT_VERSION;
 }
@@ -984,7 +990,6 @@ bool oric_load_snapshot(oric_t* sys, uint32_t version, oric_t* src) {
   // m6502_snapshot_onload(&im.cpu, &sys->cpu);
   ay38910psg_snapshot_onload(&im.psg, &sys->psg);
   oric_td_snapshot_onload(&im.td, &sys->td);
-  disk2_fdc_snapshot_onload(&im.fdc, &sys->fdc);
   mem_snapshot_onload(&im.mem, sys);
   *sys = im;
   return true;
