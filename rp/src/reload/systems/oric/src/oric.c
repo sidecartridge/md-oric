@@ -43,6 +43,7 @@
 #include "chips/mos6522via.h"
 #include "debug.h"
 #include "devices/oric_td.h"
+#include "commemul.h"
 #include "emul.h"
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
@@ -207,9 +208,6 @@ static void oric_menu_move(const oric_t* sys, int dir) {
   }
   oric_menu_sel = (uint8_t)sel;
 }
-// ESC is a real Oric key. When the UI consumes a press, its release must be
-// swallowed too, or the Oric sees a release for a press it never received.
-static volatile bool oric_swallow_esc_up = false;
 
 #define ORIC_ATTR_NORMAL ORIC_OVL_ATTR(7, 0)  /* white on black */
 #define ORIC_ATTR_DIM ORIC_OVL_ATTR(6, 0)     /* cyan on black */
@@ -671,7 +669,7 @@ static void oric_insert_disk(oric_t* sys, const char* name) {
   oric_ui_state = ORIC_UI_EMULATING;
   sys->screen_dirty = true;
   oric_set_msg(msg);
-  oric_reset(sys);
+  oric_cold_reset(sys);  // a real machine is powered on with the disk in
 }
 
 // Ejecting leaves the machine running, as pulling a real disk does.
@@ -932,12 +930,14 @@ static bool oric_menu_key(oric_t* sys, int code) {
           oric_eject_disk(sys);
           break;
         case 5:
-          // Same as the HELP key. With a disk inserted this reboots the disk
-          // (D-17); without one it lands in BASIC.
+          // A power cycle, not the HELP key's soft reset: RAM is cleared, so
+          // nothing a DOS hooked into page 2 survives once its disk is out.
+          // With a disk inserted this reboots the disk (D-17); without one
+          // it lands in a freshly started BASIC.
           oric_ui_state = ORIC_UI_EMULATING;
           sys->screen_dirty = true;
           oric_set_msg(sys->disk.inserted ? "Rebooting disk" : "Oric reset");
-          oric_reset(sys);
+          oric_cold_reset(sys);
           break;
         case 6:
           oric_status_open();
@@ -1149,7 +1149,6 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
   // ESC steps back one level. Only while a screen is open: with the menu
   // closed it is an ordinary Oric key and must reach the machine untouched.
   if (code == 0x1B && oric_ui_state != ORIC_UI_EMULATING) {
-    oric_swallow_esc_up = true;
     switch (oric_ui_state) {
       case ORIC_UI_ROMLIST:
       case ORIC_UI_TAPELIST:
@@ -1207,17 +1206,9 @@ void __not_in_flash_func(kbd_raw_key_up)(int code) {
       code = toupper(code);
     }
   }
-  // Swallow releases while a screen is open, and the F1 release always --
-  // otherwise the Oric sees a release for a press it never got.
-  if (oric_ui_state != ORIC_UI_EMULATING || code == 0x13A) {
-    return;
-  }
-  // An ESC that closed the last screen leaves the UI already back in
-  // EMULATING by the time its release arrives, so it needs its own flag.
-  if (code == 0x1B && oric_swallow_esc_up) {
-    oric_swallow_esc_up = false;
-    return;
-  }
+  // Releases always reach the matrix, menu open or not. Releasing a key the
+  // matrix never saw pressed (F1, an ESC the menu consumed) is a no-op, while
+  // swallowing releases left any key still held when F1 was pressed stuck.
   kbd_key_up(&state.oric.kbd, code);
 }
 
@@ -1338,6 +1329,62 @@ void __not_in_flash_func(core1_main()) {
   __builtin_unreachable();
 }
 
+// Every m68k read of $FBxxxx lands in the ROM3 ring; this is the demux.
+//   $8200 + byte : one IKBD byte, bit 7 = release, low 7 bits = ST scancode
+//   $8400        : the m68k finished a blit (Core 1 paces on the count)
+// Runs on Core 0, from the emulation loop.
+static void __not_in_flash_func(oric_rom3_sample)(uint16_t sample) {
+  static bool shift_pressed = false;
+  static bool ctrl_pressed = false;
+
+  if ((sample & EMUL_ROM3_KEY_MASK) != EMUL_ROM3_KEY_WINDOW) {
+    if ((sample & EMUL_ROM3_KEY_MASK) == EMUL_ROM3_BLITDONE) {
+      emul_blitDoneCount++;
+    }
+    return;
+  }
+  const bool is_press = (sample & 0x80) == 0;
+  const uint16_t scan_code = sample & 0x7F;
+  if (kbdmap_isShift(scan_code)) {
+    if (is_press) {
+      kbd_raw_key_down(ORIC_KEY_SHIFT);
+    } else {
+      kbd_raw_key_up(ORIC_KEY_SHIFT);
+    }
+    shift_pressed = is_press;
+    return;
+  }
+  if (kbdmap_isCtrl(scan_code)) {
+    if (is_press) {
+      kbd_raw_key_down(ORIC_KEY_CTRL);
+    } else {
+      kbd_raw_key_up(ORIC_KEY_CTRL);
+    }
+    ctrl_pressed = is_press;
+    return;
+  }
+  // Release exactly what was pressed. The translation depends on the
+  // modifier state, and a typist often lets go of SHIFT before the letter:
+  // SHIFT+1 goes down as '!' and would come back up as '1', a release for a
+  // key the matrix never saw, leaving '!' held until the next reboot.
+  static uint16_t pressed_code[128];
+  if (is_press) {
+    const uint16_t ascii_value =
+        kbdmap_StGsx2Ascii(scan_code, shift_pressed, ctrl_pressed);
+    pressed_code[scan_code] = ascii_value;
+    kbd_raw_key_down(ascii_value);
+  } else {
+    const uint16_t ascii_value = pressed_code[scan_code];
+    pressed_code[scan_code] = 0;
+    if (ascii_value != 0) {
+      kbd_raw_key_up(ascii_value);
+    }
+  }
+}
+
+// Cheap enough to call often: one DMA register read when nothing is queued.
+static inline void oric_rom3_drain(void) { commemul_poll(oric_rom3_sample); }
+
 int __not_in_flash_func(oric_main)() {
   // Erase the ROM area in RAM
   memset((void *)&__oric_rom_in_ram_start__, 0, 32 * 1024 * sizeof(uint8_t));
@@ -1427,51 +1474,14 @@ int __not_in_flash_func(oric_main)() {
     if (oric_have_rom) {
       for (uint32_t ticks = 0; ticks < num_ticks; ticks++) {
         oric_tick(&state.oric);
+        if ((ticks & 1023) == 0) {
+          oric_rom3_drain();  // ~1 ms: keys and blit-done stay live
+        }
       }
     }
     oric_disk_idle_flush(&state.oric);
 
-    static bool shift_pressed = false;
-    static bool ctrl_pressed = false;
-    uint16_t addr_value = 0;
-    if (emul_addrlog_pop(&addr_value)) {
-      if ((addr_value & 0xFFF) == CMD_KEYPRESS ||
-          (addr_value & 0xFFF) == CMD_KEYRELEASE) {
-        uint16_t key_value = 0;
-        if (emul_addrlog_pop(&key_value)) {
-          bool is_press = ((addr_value & 0xFFF) == CMD_KEYPRESS);
-          uint16_t scan_code = key_value & 0x7F;
-          if (kbdmap_isShift(scan_code)) {
-            if (is_press) {
-              kbd_raw_key_down(ORIC_KEY_SHIFT);
-            } else {
-              kbd_raw_key_up(ORIC_KEY_SHIFT);
-            }
-            shift_pressed = is_press;
-            continue;
-          }
-          if (kbdmap_isCtrl(scan_code)) {
-            if (is_press) {
-              kbd_raw_key_down(ORIC_KEY_CTRL);
-            } else {
-              kbd_raw_key_up(ORIC_KEY_CTRL);
-            }
-            ctrl_pressed = is_press;
-            continue;
-          }
-          DPRINTF("scan_code: $%02x, %s, shift: %c\n", scan_code,
-                  is_press ? "DOWN" : "UP", shift_pressed ? 'Y' : 'N');
-          uint16_t ascii_value =
-              kbdmap_StGsx2Ascii(scan_code, shift_pressed, ctrl_pressed);
-          if (is_press) {
-            kbd_raw_key_down(ascii_value);
-          } else {
-            kbd_raw_key_up(ascii_value);
-          }
-        }
-      }
-    }
-
+    oric_rom3_drain();
     // oric_screen_update(&state.oric);
     kbd_update(&state.oric.kbd, num_ticks);
 

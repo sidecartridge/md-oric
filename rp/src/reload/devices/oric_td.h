@@ -438,8 +438,14 @@ void oric_td_reset(oric_td_t* sys) {
   sys->size = 0;
   sys->pos = 0;
   sys->bit_pos = 7;
-  sys->sd_file_open = false;
   sys->sd_have_byte = false;
+  // SAFEGUARD: a reset rewinds the tape, it does not eject it. This used to
+  // clear sd_file_open, so after any reset (HELP, RESET ORIC, a disk boot)
+  // the drive silently played nothing while the menu still named the tape.
+  if (sys->sd_file_open && oric_tap_direct) {
+    (void)f_lseek(&sys->sd_file, 0);
+    oric_tapgen_init(&sys->sd_file, (uint32_t)f_size(&sys->sd_file));
+  }
 }
 
 void oric_td_tick_sdcard(oric_td_t* sys) {
