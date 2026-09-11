@@ -15,8 +15,18 @@
 //
 // Oricutron is GPL version 2 only. This port is used in md-oric (GPLv3) under
 // a specific permission granted by Peter Gordon for the parts md-oric needs:
-// https://github.com/pete-gordon/oricutron/issues/216 . The exact functions
-// taken are listed in docs/epics/EPIC-07-floppy/IMPORT-LIST.md.
+// https://github.com/pete-gordon/oricutron/issues/216
+//
+// Taken from disk.c / disk.h and nothing else:
+//   calc_crc, wd17xx_init, wd17xx_ticktock, wd17xx_seek_track,
+//   wd17xx_find_sector, wd17xx_first_sector, wd17xx_next_sector,
+//   wd17xx_read, wd17xx_write, microdisc_init/read/write and its
+//   setdrq/clrdrq/setintrq/clrintrq callbacks, diskimage_cachetrack, the
+//   MFM_DISK header checks out of diskimage_load, and the struct and
+//   constant definitions (wd17xx, microdisc, mfmsector, WSF_*, MDSF_*,
+//   MF_DRQ, COP_*).
+// Not taken: the Jasmin, Byte Drive 500 and Pravetz controllers, host-side
+// image allocation and saving, popups, and debug output.
 //
 // What differs from upstream, and why:
 //
@@ -1082,7 +1092,7 @@ void microdisc_init(oric_microdisc_t* md, oric_wd17xx_t* wd) {
   md->drq = 0;
   md->wd = wd;
   md->diskrom = true;
-  md->romdis = false;  // the owner decides at reset (D-17)
+  md->romdis = false;  // oric_reset() decides: set only with a disk in
   md->irq = false;
 }
 

@@ -44,10 +44,8 @@ enum {
  */
 void emul_start();
 
-// Bumped by the DMA IRQ each time the m68k signals "blit finished". Read by
-// Core 1 to pace rendering. Deliberately NOT routed through the address ring:
-// oric_main pops at most one ring entry per frame, so a per-frame event there
-// would starve keyboard input (D-14).
+// Bumped each time the m68k signals "blit finished" -- one ROM3 read, picked
+// up when Core 0 drains the sample ring. Read by Core 1 to pace rendering.
 extern volatile uint32_t emul_blitDoneCount;
 
 // Ring buffer for DMA LSB lookup values.

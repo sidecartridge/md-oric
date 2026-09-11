@@ -86,9 +86,9 @@ uint16_t oric_via_queue_head;
 static volatile uint32_t oric_msg_until_us;
 static char oric_msg_buf[32];
 
-// EPIC-03 STORY-01: cost of oric_screen_update, sampled on Core 1 and read on
-// Core 0 when the stats key is pressed. Scalars, so volatile is enough to stop
-// the compiler caching them across the loop (D-13); the barrier before reading
+// Cost of oric_screen_update, sampled on Core 1 and read on Core 0 when the
+// stats key is pressed. Scalars, so volatile is enough to stop the compiler
+// caching them across the loop; the barrier before reading
 // keeps the four consistent with each other.
 static volatile uint32_t oric_cvt_min_us = 0xFFFFFFFFu;
 static volatile uint32_t oric_cvt_max_us = 0;
@@ -99,11 +99,13 @@ static volatile uint32_t oric_cvt_count = 0;
 // On-screen menu. Dispatcher shape follows md-gpu-demo's demo_menu.c: one key
 // owned for entering/leaving, everything else forwarded to whatever is active.
 // Here the owned key is F1 rather than ESC -- ESC is a real Oric key, whereas
-// the Oric has no function keys, so F1 is free (D-15, D-16).
+// the Oric has no function keys, so F1 is free.
 //
 // State is written on Core 0 (the key handler) and read on Core 1 (the
-// renderer), so it follows D-13: writer fills the payload, __dmb(), then
-// raises the flag; reader tests the flag, __dmb(), then reads the payload.
+// renderer), so it follows the rule every cross-core signal here follows:
+// writer fills the payload, __dmb(), then raises the flag; reader tests the
+// flag, __dmb(), then reads the payload. Without the pair the compiler is
+// free to cache the payload in a register and never see the update.
 // ---------------------------------------------------------------------------
 enum {
   ORIC_UI_EMULATING = 0,
@@ -241,6 +243,23 @@ static bool oric_name_has_ext(const char* name, const char* ext) {
 
 // Runs on Core 0 from the key handler, not from the per-frame path: it blocks
 // on the SD card, so it must not sit inside the emulation or render loops.
+// Every spelling the Microdisc EPROM is shipped under. FatFs matches names
+// case-insensitively, so MICRODIS.ROM and microdis.rom are the same entry
+// here; only the stems need listing.
+static const char *const oric_microdisc_rom_names[] = {
+    ORIC_MICRODISC_ROM_NAME, ORIC_MICRODISC_ROM_ALT};
+
+// True for any of them, for the file scanner -- the EPROM is not a BASIC ROM
+// and must never be offered as one, or counted by the single-ROM auto-install.
+static bool oric_is_microdisc_rom(const char *name) {
+  for (size_t i = 0; i < CHIPS_ARRAY_SIZE(oric_microdisc_rom_names); i++) {
+    if (strcasecmp(name, oric_microdisc_rom_names[i]) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void oric_scan_files_ext(const char* ext) {
 
   DIR dir;
@@ -266,10 +285,10 @@ static void oric_scan_files_ext(const char* ext) {
     if (!oric_name_has_ext(info.fname, ext)) {
       continue;
     }
-    // The Microdisc EPROM shares the folder under a fixed name (D-17). It is
-    // not a BASIC ROM and must not be offered as one -- or counted as one by
-    // the single-ROM auto-install.
-    if (strcasecmp(info.fname, ORIC_MICRODISC_ROM_NAME) == 0) {
+    // The Microdisc EPROM shares the folder. It is not a BASIC ROM and
+    // must not be offered as one -- or counted as one by the single-ROM
+    // auto-install.
+    if (oric_is_microdisc_rom(info.fname)) {
       continue;
     }
     if (strlen(info.fname) >= ORIC_NAME_MAX) {
@@ -345,6 +364,15 @@ static void oric_menu_render(oric_t* sys) {
   oric_ovl_present(sys);
 }
 
+// The docs URL in full, for anyone who cannot scan the code. 86 characters
+// over three lines, broken at the path separators; the first and last are
+// exactly 30 columns, so they start at column 0 to fit the grid.
+static void oric_draw_docs_url(void) {
+  oric_ovl_text(0, 23, "https://docs.sidecartridge.com", ORIC_ATTR_DIM);
+  oric_ovl_text(0, 24, "/sidecartridge-multidevice", ORIC_ATTR_DIM);
+  oric_ovl_text(0, 25, "/microfirmwares/oric-emulator/", ORIC_ATTR_DIM);
+}
+
 static void oric_list_render(oric_t* sys) {
   const bool roms = (oric_ui_state == ORIC_UI_ROMLIST);
   const bool disks = (oric_ui_state == ORIC_UI_DISKLIST);
@@ -354,16 +382,23 @@ static void oric_list_render(oric_t* sys) {
 
   if (disks && !sys->md_present) {
     // The list is pointless without the controller, and the controller only
-    // exists when its EPROM is on the card (D-17). Say so.
-    oric_ovl_text(1, 6, "No Microdisc EPROM found.", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 8, "Copy the 8 KB Microdisc", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 9, "ROM as", ORIC_ATTR_NORMAL);
-    oric_ovl_text(8, 9, ORIC_MICRODISC_ROM_NAME, ORIC_ATTR_DIM);
-    oric_ovl_text(1, 10, "into", ORIC_ATTR_NORMAL);
-    oric_ovl_text(6, 10, oric_folder_name(), ORIC_ATTR_DIM);
-    oric_ovl_text(1, 11, "and reset the emulator.", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
+    // exists when its EPROM is on the card. Say so.
+    // Laid out like the missing-ROM screen: row 2 already carries the
+    // "SELECT DISK" heading, so this starts at 4.
+    char line[ORIC_OVL_COLS + 1];
+    oric_ovl_text(1, 4, "No Microdisc EPROM found.", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 6, "Copy the 8 KB ROM as", ORIC_ATTR_NORMAL);
+    (void)snprintf(line, sizeof(line), "%s or %s", ORIC_MICRODISC_ROM_NAME,
+                   ORIC_MICRODISC_ROM_ALT);
+    oric_ovl_text(1, 7, line, ORIC_ATTR_NORMAL);
+    (void)snprintf(line, sizeof(line), "into %s, then reset.",
+                   oric_folder_name());
+    oric_ovl_text(1, 8, line, ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 10, "Scan for the setup guide:", ORIC_ATTR_DIM);
+    oric_draw_docs_url();
+    oric_ovl_text(1, 27, "ESC=BACK", ORIC_ATTR_DIM);
     oric_ovl_present(sys);
+    oric_ovl_qr(sys, 90);
     return;
   }
 
@@ -388,19 +423,23 @@ static void oric_list_render(oric_t* sys) {
       oric_ovl_present(sys);
       return;
     }
-    // Reachable now that nothing is embedded (D-07 superseded), so it has to
-    // say what to do rather than being an empty box.
-    oric_ovl_text(1, 6, "No BASIC ROM file found in", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 7, oric_folder_name(), ORIC_ATTR_DIM);
-    oric_ovl_text(1, 9, "Copy at least one .rom", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 10, "file there, then reopen", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 11, "this menu.", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 13, "Please read the", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 14, "microfirmware documentation", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 15, "to find one:", ORIC_ATTR_NORMAL);
-    oric_ovl_text(1, 17, "docs.sidecartridge.com", ORIC_ATTR_DIM);
-    oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
+    // Reachable, since no ROM is embedded in the binary, so it has to
+    // say what to do rather than being an empty box. The QR goes to the
+    // setup page, which is where a ROM actually comes from -- easier to
+    // follow on a phone than typing a long URL off a 40-column screen.
+    // Row 2 already carries the "SELECT ROM" heading, so this starts at 4.
+    oric_ovl_text(1, 4, "No BASIC ROM file found in", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 5, oric_folder_name(), ORIC_ATTR_DIM);
+    oric_ovl_text(1, 7, "Copy at least one .rom file", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 8, "there, then reopen this menu.", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 10, "Scan for the setup guide:", ORIC_ATTR_DIM);
+    oric_draw_docs_url();
+    oric_ovl_text(1, 27, "ESC=BACK", ORIC_ATTR_DIM);
     oric_ovl_present(sys);
+    // After present(): it rewrites whole scanlines, so the code goes on
+    // afterwards, between the prompt at row 10 (ends at line 87) and the
+    // URL at row 23 (starts at line 184).
+    oric_ovl_qr(sys, 90);
     return;
   }
 
@@ -642,7 +681,7 @@ static void oric_disklist_open(void) {
 
 // Insert a disk and boot it. A real Microdisc boots whatever is in the drive
 // at power-on, so inserting from the menu resets the Oric with ROMDIS
-// asserted (D-17) -- the EPROM then loads the boot sector.
+// asserted -- the EPROM then loads the boot sector.
 static void oric_insert_disk(oric_t* sys, const char* name) {
   char msg[ORIC_OVL_COLS + 1];
   const char* folder = oric_folder_name();
@@ -766,6 +805,7 @@ static void oric_status_render(oric_t* sys) {
     (void)snprintf(line, sizeof(line), "DISK: %s",
                    oric_disk_name[0] ? oric_disk_name : "Microdisc, no disk");
     oric_ovl_text(2, 8, line, ORIC_ATTR_NORMAL);
+    oric_ovl_text(2, 9, "Disk support is experimental", ORIC_ATTR_DIM);
   }
 
   // Conversion timing. Nothing is converted while this screen is up -- Core 1
@@ -851,30 +891,30 @@ static void oric_help_render(oric_t* sys) {
   oric_ovl_clear(ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 1, "HELP", ORIC_ATTR_NORMAL);
 
-  oric_ovl_text(2, 3, "Menu", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 3, "Menu keys", ORIC_ATTR_DIM);
   oric_ovl_text(2, 4, "F1      open the menu", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 5, "ESC     back / close", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 6, "Up/Dn   move", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 7, "L/R     page a list", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 8, "Return  choose", ORIC_ATTR_NORMAL);
 
-  oric_ovl_text(2, 10, "Oric", ORIC_ATTR_DIM);
-  oric_ovl_text(2, 11, "HELP    reset the Oric", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 10, "Oric keys", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 11, "HELP    soft reset", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 12, "UNDO    break (NMI)", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 13, "HOME    show timing", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 14, "Every other key is the", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 15, "Oric's own.", ORIC_ATTR_DIM);
 
-  oric_ovl_text(2, 15, "Loading a tape", ORIC_ATTR_DIM);
-  oric_ovl_text(2, 16, "F1, SELECT TAPE, pick a", ORIC_ATTR_NORMAL);
-  oric_ovl_text(2, 17, "file, then type CLOAD\"\"", ORIC_ATTR_NORMAL);
-  oric_ovl_text(2, 18, "at the BASIC prompt.", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 17, "Load a tape", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 18, "SELECT TAPE, pick a file,", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 19, "then CLOAD\"\" at the prompt", ORIC_ATTR_NORMAL);
 
-  oric_ovl_text(2, 20, "Changing the ROM", ORIC_ATTR_DIM);
-  oric_ovl_text(2, 21, "F1, SELECT ROM, pick one.", ORIC_ATTR_NORMAL);
-  oric_ovl_text(2, 22, "The emulator reboots.", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 21, "Boot a disk (experimental)", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 22, "SELECT DISK, pick a file.", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 23, "Needs microdisc.rom.", ORIC_ATTR_NORMAL);
 
-  oric_ovl_text(2, 24, "Disk: SELECT DISK boots it.", ORIC_ATTR_NORMAL);
-
-  oric_ovl_text(2, 25, "ESC=BACK", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 25, "RESET ORIC  power cycle", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 26, "ESC=BACK", ORIC_ATTR_DIM);
   oric_ovl_present(sys);
 }
 
@@ -889,6 +929,7 @@ static void oric_status_open(void) {
 }
 
 static void oric_menu_open(void) {
+  oric_boot_hint_active = false;  // it has served its purpose
   oric_menu_sel = 0;
   oric_ui_repaint();
   oric_ui_state = ORIC_UI_MENU;
@@ -932,7 +973,7 @@ static bool oric_menu_key(oric_t* sys, int code) {
         case 5:
           // A power cycle, not the HELP key's soft reset: RAM is cleared, so
           // nothing a DOS hooked into page 2 survives once its disk is out.
-          // With a disk inserted this reboots the disk (D-17); without one
+          // With a disk inserted this reboots the disk; without one
           // it lands in a freshly started BASIC.
           oric_ui_state = ORIC_UI_EMULATING;
           sys->screen_dirty = true;
@@ -961,6 +1002,13 @@ static bool oric_menu_key(oric_t* sys, int code) {
 }
 
 
+// How long the "Press F1 for config menu" hint stays up. Long enough to read
+// while the Oric boots; it goes early if the menu is opened.
+#ifndef ORIC_BOOT_HINT_SECONDS
+#define ORIC_BOOT_HINT_SECONDS 5u
+#endif
+static volatile uint32_t oric_boot_hint_until_us;
+
 #ifndef ORIC_MSG_DISPLAY_SECONDS
 #define ORIC_MSG_DISPLAY_SECONDS 3u
 #endif
@@ -970,7 +1018,7 @@ static bool oric_menu_key(oric_t* sys, int code) {
 #define ORIC_FRAME_FALLBACK_US 25000u
 
 // Payload then flag, always: Core 1 keys off the deadline, so the text must be
-// complete and visible before the deadline is raised (D-13).
+// complete and visible before the deadline is raised.
 static void oric_publish_msg(void) {
   __dmb();
   oric_msg_until_us = time_us_32() + (ORIC_MSG_DISPLAY_SECONDS * 1000u * 1000u);
@@ -1019,7 +1067,7 @@ __attribute__((aligned(4))) oric_rom[ORIC_ROM_SIZE] = {0};
 
 // Microdisc: the 16 KB of RAM under the BASIC ROM (Sedoric lives there), the
 // 8 KB EPROM read from microdisc.rom, and the one resident disk track. Together
-// ~31 KB, which is nearly all of what ORIC_RAM had left (EPIC-07 memory plan).
+// ~31 KB, which is nearly all of what ORIC_RAM had left.
 static uint8_t __attribute__((section(".oric_ram")))
 __attribute__((aligned(4))) oric_overlay_ram[0x4000];
 static uint8_t __attribute__((section(".oric_ram")))
@@ -1040,7 +1088,7 @@ oric_desc_t oric_desc(void) {
       .roms =
           {
               .rom = {.ptr = oric_rom, .size = sizeof(oric_rom)},
-              // Size 0 means no Microdisc: the controller stays absent (D-17).
+              // Size 0 means no Microdisc: the controller stays absent.
               .microdisc_rom = {.ptr = oric_microdisc_rom,
                                 .size = oric_microdisc_rom_loaded
                                             ? sizeof(oric_microdisc_rom)
@@ -1055,31 +1103,38 @@ oric_desc_t oric_desc(void) {
 // leaves the controller absent rather than booting garbage at $E000.
 static bool load_microdisc_rom_from_sd(void) {
   const char *folderName = oric_folder_name();
-  char path[256];
   size_t name_len = strlen(folderName);
   const char *sep =
       (name_len > 0 && folderName[name_len - 1] == '/') ? "" : "/";
-  int path_len = snprintf(path, sizeof(path), "%s%s%s", folderName, sep,
-                          ORIC_MICRODISC_ROM_NAME);
-  if (path_len <= 0 || (size_t)path_len >= sizeof(path)) {
-    return false;
+
+  for (size_t i = 0; i < CHIPS_ARRAY_SIZE(oric_microdisc_rom_names); i++) {
+    const char *romName = oric_microdisc_rom_names[i];
+    char path[256];
+    int path_len =
+        snprintf(path, sizeof(path), "%s%s%s", folderName, sep, romName);
+    if (path_len <= 0 || (size_t)path_len >= sizeof(path)) {
+      continue;
+    }
+    FIL file;
+    if (f_open(&file, path, FA_READ) != FR_OK) {
+      continue;  // try the next spelling
+    }
+    UINT bytes_read = 0;
+    FRESULT res = f_read(&file, oric_microdisc_rom, sizeof(oric_microdisc_rom),
+                         &bytes_read);
+    f_close(&file);
+    if (res != FR_OK || bytes_read != sizeof(oric_microdisc_rom)) {
+      // Found but unusable: say so rather than silently trying the next one,
+      // since a wrong-sized file is a mistake worth knowing about.
+      DPRINTF("oric: %s unusable (%d, %u bytes)\n", romName, (int)res,
+              (unsigned)bytes_read);
+      continue;
+    }
+    DPRINTF("oric: Microdisc EPROM loaded from %s\n", romName);
+    return true;
   }
-  FIL file;
-  if (f_open(&file, path, FA_READ) != FR_OK) {
-    DPRINTF("oric: no %s, Microdisc absent\n", ORIC_MICRODISC_ROM_NAME);
-    return false;
-  }
-  UINT bytes_read = 0;
-  FRESULT res =
-      f_read(&file, oric_microdisc_rom, sizeof(oric_microdisc_rom), &bytes_read);
-  f_close(&file);
-  if (res != FR_OK || bytes_read != sizeof(oric_microdisc_rom)) {
-    DPRINTF("oric: %s unusable (%d, %u bytes)\n", ORIC_MICRODISC_ROM_NAME,
-            (int)res, (unsigned)bytes_read);
-    return false;
-  }
-  DPRINTF("oric: Microdisc EPROM loaded\n");
-  return true;
+  DPRINTF("oric: no Microdisc EPROM found, controller absent\n");
+  return false;
 }
 
 void app_init(void) {
@@ -1230,7 +1285,7 @@ void __not_in_flash_func(core1_main()) {
     uint32_t now_us = time_us_32();
     // Pace on the m68k's "blit finished" signal rather than free-running, so a
     // frame is never started while the ST is still reading the buffer it would
-    // land in, and Core 1 stops drifting against the ST's VBL (D-12, D-10).
+    // land in, and Core 1 stops drifting against the ST's VBL.
     // The timeout is the safety net: the m68k stops signalling whenever the ST
     // is reset or running anything but the blit loop, and a Core 1 that waited
     // forever would be a dead display with no obvious cause.
@@ -1259,6 +1314,15 @@ void __not_in_flash_func(core1_main()) {
         }
         next_update_us = now_us + 19968;
         continue;
+      }
+      // The boot hint sits over the Oric screen while the machine starts.
+      // The Oric writes nothing to screen RAM for most of that time, so force
+      // the repaint; one more when it expires takes the hint back off.
+      if (oric_boot_hint_active) {
+        if ((int32_t)(now_us - oric_boot_hint_until_us) >= 0) {
+          oric_boot_hint_active = false;
+        }
+        state.oric.screen_dirty = true;
       }
       uint32_t until_us = oric_msg_until_us;
       if (until_us != 0 && (int32_t)(until_us - now_us) > 0) {
@@ -1465,6 +1529,11 @@ int __not_in_flash_func(oric_main)() {
   // not read a leftover reset command on its first VBL.
   *((volatile uint32_t*)((uint8_t*)&__rom_in_ram_start__ + ATARI_ST_LISTENER_OFFSET)) = 0;
 
+  // Show the hint from the moment the screen is live until the Oric has
+  // booted and drawn its own display over it.
+  oric_boot_hint_until_us = time_us_32() + (ORIC_BOOT_HINT_SECONDS * 1000000u);
+  oric_boot_hint_active = true;
+
   multicore_launch_core1(core1_main);
 
   uint32_t num_ticks = 19968;
@@ -1482,7 +1551,6 @@ int __not_in_flash_func(oric_main)() {
     oric_disk_idle_flush(&state.oric);
 
     oric_rom3_drain();
-    // oric_screen_update(&state.oric);
     kbd_update(&state.oric.kbd, num_ticks);
 
     uint32_t end_time_in_micros = time_us_32();
