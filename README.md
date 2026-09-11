@@ -67,6 +67,12 @@ controller's EPROM, not a BASIC ROM. Then copy `.dsk` images alongside it. They
 must be in the **MFM_DISK** format used by Oricutron and Euphoric (the common
 format on oric.org); other `.dsk` flavours are refused with a message.
 
+The emulated machine is an Atmos with a Microdisc, so the disk must carry a
+Microdisc-bootable DOS — Sedoric, in practice. **Telestrat disks** (Stratsed;
+oric.org often labels them `Telestrat`) boot only on a Telestrat, and the
+Microdisc ROM answers them with `NO OPERATING SYSTEM`. Most titles exist in an
+Atmos/Sedoric version as well — pick that one.
+
 That is all the setup there is. Subdirectories, hidden files and system files
 are ignored, so a card written from macOS or Windows will not show stray
 entries.
@@ -95,7 +101,7 @@ Press **F1** at any time to open the menu:
 | **EJECT TAPE** | Remove the current tape (shown only while one is inserted) |
 | **SELECT DISK (EXPERIMENTAL)** | Insert a `.dsk` and boot it — the Oric resets with the Microdisc ROM active, the way a real one boots with a disk in the drive |
 | **EJECT DISK (EXPERIMENTAL)** | Remove the current disk; the Oric keeps running (shown only while one is inserted) |
-| **RESET ORIC** | Same as the HELP key: reboots the disk if one is inserted, otherwise back to BASIC |
+| **RESET ORIC** | A power cycle: memory is cleared, then the disk boots if one is inserted, otherwise BASIC starts fresh. (HELP is the soft reset that keeps memory.) |
 | **STATUS** | Version, current ROM, tape and disk, and emulator timing |
 | **HELP** | The keys and how to load a tape or change the ROM, on screen |
 | **RETURN TO BOOSTER** | Leave the emulator and cold-boot the ST into the Booster app |
@@ -116,10 +122,14 @@ Oric software online in places like [Oric.org](http://www.oric.org/).
 | Key | Action |
 | --- | --- |
 | **F1** | Open the menu |
-| **ESC** | Go back a level, or close the menu |
-| **HELP** | Soft reset of the Oric |
+| **ESC** | Go back a level, or close the menu. With the menu closed it is the Oric's own ESC |
+| **HELP** | Soft reset of the Oric (memory kept) |
 | **UNDO** | Non-maskable interrupt (break) |
 | **HOME** | Show screen-conversion timing without opening the menu |
+
+Every other key goes to the Oric, including F2–F10. The Atari ST layout is
+mapped to the Oric's keyboard, so a few symbols sit where the Oric expects
+them rather than where the ST key cap says.
 
 ### ⏏️ Exiting to Booster
 
