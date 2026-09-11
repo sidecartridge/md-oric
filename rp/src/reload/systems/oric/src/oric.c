@@ -110,7 +110,8 @@ enum {
   ORIC_UI_ROMLIST = 2,
   ORIC_UI_TAPELIST = 3,
   ORIC_UI_STATUS = 4,
-  ORIC_UI_HELP = 5
+  ORIC_UI_HELP = 5,
+  ORIC_UI_DISKLIST = 6
 };
 
 
@@ -136,6 +137,7 @@ static int oric_files_skipped;
 
 // Name of the tape currently in the drive, for the menu and for eject.
 static char oric_tape_name[ORIC_NAME_MAX];
+static char oric_disk_name[ORIC_NAME_MAX];
 static volatile uint16_t oric_list_sel;
 
 static void oric_publish_msg(void);
@@ -169,14 +171,42 @@ static void oric_core1_resume(void) {
 // "RETURN TO BOOSTER" sits second-to-last deliberately. The main menu wraps,
 // so the last entry is one UP press from the default selection -- not where a
 // one-way exit belongs.
-#define ORIC_MENU_ITEMS 7
+#define ORIC_MENU_ITEMS 10
 static const char* const oric_menu_items[ORIC_MENU_ITEMS] = {
-    "SELECT ROM", "SELECT TAPE", "EJECT TAPE",       "STATUS",
-    "HELP",       "RETURN TO BOOSTER", "RESUME"};
+    "SELECT ROM",  "SELECT TAPE", "EJECT TAPE",
+    "SELECT DISK (EXPERIMENTAL)", "EJECT DISK (EXPERIMENTAL)",
+    "RESET ORIC",  "STATUS",      "HELP",
+    "RETURN TO BOOSTER", "RESUME"};
+
 
 static volatile uint8_t oric_ui_state = ORIC_UI_EMULATING;
 static volatile bool oric_ui_redraw = false;
 static volatile uint8_t oric_menu_sel = 0;
+
+// The eject entries only exist while there is something to eject; an entry
+// that can only answer "nothing inserted" is noise.
+static bool oric_menu_item_visible(const oric_t* sys, int i) {
+  switch (i) {
+    case 2:
+      return oric_tape_name[0] != '\0';
+    case 4:
+      return sys->disk.inserted;
+    default:
+      return true;
+  }
+}
+
+// Step the selection to the next visible entry in either direction.
+static void oric_menu_move(const oric_t* sys, int dir) {
+  int sel = oric_menu_sel;
+  for (int n = 0; n < ORIC_MENU_ITEMS; n++) {
+    sel = (sel + dir + ORIC_MENU_ITEMS) % ORIC_MENU_ITEMS;
+    if (oric_menu_item_visible(sys, sel)) {
+      break;
+    }
+  }
+  oric_menu_sel = (uint8_t)sel;
+}
 // ESC is a real Oric key. When the UI consumes a press, its release must be
 // swallowed too, or the Oric sees a release for a press it never received.
 static volatile bool oric_swallow_esc_up = false;
@@ -277,18 +307,25 @@ static void oric_scan_tapes(void) {
 
 static void oric_menu_render(oric_t* sys) {
   oric_ovl_clear(ORIC_ATTR_NORMAL);
-  oric_ovl_text(8, 2, "ORIC EMULATOR", ORIC_ATTR_NORMAL);
-  oric_ovl_text(8, 3, "-------------", ORIC_ATTR_DIM);
+  oric_ovl_text(8, 1, "ORIC EMULATOR", ORIC_ATTR_NORMAL);
 
+  // A hidden entry cannot stay selected (ejecting from it hides it).
+  if (!oric_menu_item_visible(sys, oric_menu_sel)) {
+    oric_menu_move(sys, 1);
+  }
   const uint8_t sel = oric_menu_sel;
+  int row = 3;  // up to 10 entries: rows 3..21, info lines at 23-25
   for (int i = 0; i < ORIC_MENU_ITEMS; i++) {
-    const int row = 5 + i * 2;  // 7 entries: rows 5..17, clear of ROM/TAPE
+    if (!oric_menu_item_visible(sys, i)) {
+      continue;
+    }
     const uint8_t attr = (i == sel) ? ORIC_ATTR_HILITE : ORIC_ATTR_NORMAL;
     // Highlight the whole bar, not just the text, so the selection reads
     // clearly at 8x8 -- the cell attribute does the job a filled rect does
     // in md-gpu-demo.
-    oric_ovl_fill(4, row, 22, attr);
-    oric_ovl_text(6, row, oric_menu_items[i], attr);
+    oric_ovl_fill(2, row, 27, attr);
+    oric_ovl_text(3, row, oric_menu_items[i], attr);
+    row += 2;
   }
 
   SettingsConfigEntry* romEntry =
@@ -297,22 +334,52 @@ static void oric_menu_render(oric_t* sys) {
       (romEntry && romEntry->value[0] != '\0') ? romEntry->value : "(none)";
   char line[ORIC_OVL_COLS + 1];
   (void)snprintf(line, sizeof(line), "ROM: %s", romName);
-  oric_ovl_text(2, 20, line, ORIC_ATTR_DIM);
+  oric_ovl_text(2, 23, line, ORIC_ATTR_DIM);
   (void)snprintf(line, sizeof(line), "TAPE: %s",
                  oric_tape_name[0] ? oric_tape_name : "(none)");
-  oric_ovl_text(2, 21, line, ORIC_ATTR_DIM);
+  oric_ovl_text(2, 24, line, ORIC_ATTR_DIM);
+  (void)snprintf(line, sizeof(line), "DISK: %s",
+                 oric_disk_name[0] ? oric_disk_name
+                                   : (sys->md_present ? "(none)" : "(no Microdisc)"));
+  oric_ovl_text(2, 25, line, ORIC_ATTR_DIM);
 
-  oric_ovl_text(2, 24, "UP/DN  RET=SELECT", ORIC_ATTR_DIM);
-  oric_ovl_text(2, 25, "ESC=CLOSE", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 27, "UP/DN  RET=SELECT  ESC=CLOSE", ORIC_ATTR_DIM);
   oric_ovl_present(sys);
 }
 
 static void oric_list_render(oric_t* sys) {
   const bool roms = (oric_ui_state == ORIC_UI_ROMLIST);
+  const bool disks = (oric_ui_state == ORIC_UI_DISKLIST);
   oric_ovl_clear(ORIC_ATTR_NORMAL);
-  oric_ovl_text(2, 2, roms ? "SELECT ROM" : "SELECT TAPE", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 2, roms ? "SELECT ROM" : (disks ? "SELECT DISK" : "SELECT TAPE"),
+                ORIC_ATTR_NORMAL);
+
+  if (disks && !sys->md_present) {
+    // The list is pointless without the controller, and the controller only
+    // exists when its EPROM is on the card (D-17). Say so.
+    oric_ovl_text(1, 6, "No Microdisc EPROM found.", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 8, "Copy the 8 KB Microdisc", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 9, "ROM as", ORIC_ATTR_NORMAL);
+    oric_ovl_text(8, 9, ORIC_MICRODISC_ROM_NAME, ORIC_ATTR_DIM);
+    oric_ovl_text(1, 10, "into", ORIC_ATTR_NORMAL);
+    oric_ovl_text(6, 10, oric_folder_name(), ORIC_ATTR_DIM);
+    oric_ovl_text(1, 11, "and reset the emulator.", ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
+    oric_ovl_present(sys);
+    return;
+  }
 
   if (oric_file_count == 0) {
+    if (disks) {
+      oric_ovl_text(1, 6, "No disk images found in", ORIC_ATTR_NORMAL);
+      oric_ovl_text(1, 7, oric_folder_name(), ORIC_ATTR_DIM);
+      oric_ovl_text(1, 9, "Copy .dsk files (MFM_DISK", ORIC_ATTR_NORMAL);
+      oric_ovl_text(1, 10, "format) there, then reopen", ORIC_ATTR_NORMAL);
+      oric_ovl_text(1, 11, "this menu.", ORIC_ATTR_NORMAL);
+      oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
+      oric_ovl_present(sys);
+      return;
+    }
     if (!roms) {
       oric_ovl_text(1, 6, "No tape files found in", ORIC_ATTR_NORMAL);
       oric_ovl_text(1, 7, oric_folder_name(), ORIC_ATTR_DIM);
@@ -550,6 +617,60 @@ static void oric_insert_tape(oric_t* sys, const char* name) {
   oric_set_msg(msg);
 }
 
+static void oric_disklist_open(void) {
+  oric_scan_files(".dsk");
+  oric_list_sel = 0;
+  oric_ui_repaint();
+  oric_ui_state = ORIC_UI_DISKLIST;
+}
+
+// Insert a disk and boot it. A real Microdisc boots whatever is in the drive
+// at power-on, so inserting from the menu resets the Oric with ROMDIS
+// asserted (D-17) -- the EPROM then loads the boot sector.
+static void oric_insert_disk(oric_t* sys, const char* name) {
+  char msg[ORIC_OVL_COLS + 1];
+  const char* folder = oric_folder_name();
+  size_t flen = strlen(folder);
+  const char* sep = (flen > 0 && folder[flen - 1] == '/') ? "" : "/";
+  char path[256];
+  if (snprintf(path, sizeof(path), "%s%s%s", folder, sep, name) <= 0) {
+    return;
+  }
+  uint8_t* track = sys->disk.track;  // diskimage_open() resets the struct
+  if (!diskimage_open(&sys->disk, path, track)) {
+    oric_disk_name[0] = '\0';
+    oric_ovl_clear(ORIC_ATTR_NORMAL);
+    (void)snprintf(msg, sizeof(msg), "Cannot use %s", name);
+    oric_ovl_text(1, 8, msg, ORIC_ATTR_NORMAL);
+    oric_ovl_text(1, 10, "Not an MFM_DISK image, or", ORIC_ATTR_DIM);
+    oric_ovl_text(1, 11, "the card is unreadable.", ORIC_ATTR_DIM);
+    oric_ovl_text(1, 25, "ESC=BACK", ORIC_ATTR_DIM);
+    oric_ovl_present(sys);
+    return;  // stay on the list
+  }
+  (void)snprintf(oric_disk_name, sizeof(oric_disk_name), "%s", name);
+  (void)snprintf(msg, sizeof(msg), "Booting %s", name);
+  oric_ui_state = ORIC_UI_EMULATING;
+  sys->screen_dirty = true;
+  oric_set_msg(msg);
+  oric_reset(sys);
+}
+
+// Ejecting leaves the machine running, as pulling a real disk does.
+static void oric_eject_disk(oric_t* sys) {
+  if (!sys->md_present) {
+    oric_set_msg("No Microdisc fitted");
+  } else if (!sys->disk.inserted) {
+    oric_set_msg("No disk inserted");
+  } else {
+    diskimage_close(&sys->disk);
+    oric_disk_name[0] = '\0';
+    oric_set_msg("Disk ejected");
+  }
+  oric_ui_state = ORIC_UI_EMULATING;
+  sys->screen_dirty = true;
+}
+
 static void oric_eject_tape(oric_t* sys) {
   if (!sys->td.valid || oric_tape_name[0] == '\0') {
     oric_set_msg("No tape inserted");
@@ -587,6 +708,8 @@ static bool oric_romlist_key(oric_t* sys, int code) {
     case '\r':
       if (oric_ui_state == ORIC_UI_TAPELIST) {
         oric_insert_tape(sys, oric_files[sel]);
+      } else if (oric_ui_state == ORIC_UI_DISKLIST) {
+        oric_insert_disk(sys, oric_files[sel]);
       } else {
         oric_select_rom(sys, oric_files[sel]);
       }
@@ -621,10 +744,13 @@ static void oric_status_render(oric_t* sys) {
   oric_ovl_text(2, 7, line, ORIC_ATTR_NORMAL);
   // The Microdisc EPROM is deliberately hidden from the ROM picker, so this
   // is the one place that says whether microdisc.rom was found.
-  oric_ovl_text(2, 8,
-                sys->md_present ? "DISK: Microdisc, no disk"
-                                : "DISK: no " ORIC_MICRODISC_ROM_NAME,
-                sys->md_present ? ORIC_ATTR_NORMAL : ORIC_ATTR_DIM);
+  if (!sys->md_present) {
+    oric_ovl_text(2, 8, "DISK: no " ORIC_MICRODISC_ROM_NAME, ORIC_ATTR_DIM);
+  } else {
+    (void)snprintf(line, sizeof(line), "DISK: %s",
+                   oric_disk_name[0] ? oric_disk_name : "Microdisc, no disk");
+    oric_ovl_text(2, 8, line, ORIC_ATTR_NORMAL);
+  }
 
   // Conversion timing. Nothing is converted while this screen is up -- Core 1
   // is rendering the menu, not the Oric screen -- so the numbers are a stable
@@ -730,6 +856,8 @@ static void oric_help_render(oric_t* sys) {
   oric_ovl_text(2, 21, "F1, SELECT ROM, pick one.", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 22, "The emulator reboots.", ORIC_ATTR_NORMAL);
 
+  oric_ovl_text(2, 24, "Disk: SELECT DISK boots it.", ORIC_ATTR_NORMAL);
+
   oric_ovl_text(2, 25, "ESC=BACK", ORIC_ATTR_DIM);
   oric_ovl_present(sys);
 }
@@ -761,12 +889,11 @@ static void oric_menu_close(oric_t* sys) {
 static bool oric_menu_key(oric_t* sys, int code) {
   switch (code) {
     case 0x152:  // UP
-      oric_menu_sel =
-          (uint8_t)((oric_menu_sel + ORIC_MENU_ITEMS - 1) % ORIC_MENU_ITEMS);
+      oric_menu_move(sys, -1);
       oric_ui_repaint();
       return true;
     case 0x151:  // DOWN
-      oric_menu_sel = (uint8_t)((oric_menu_sel + 1) % ORIC_MENU_ITEMS);
+      oric_menu_move(sys, 1);
       oric_ui_repaint();
       return true;
     case '\r':  // RETURN
@@ -781,12 +908,26 @@ static bool oric_menu_key(oric_t* sys, int code) {
           oric_eject_tape(sys);
           break;
         case 3:
-          oric_status_open();
+          oric_disklist_open();
           break;
         case 4:
-          oric_help_open();
+          oric_eject_disk(sys);
           break;
         case 5:
+          // Same as the HELP key. With a disk inserted this reboots the disk
+          // (D-17); without one it lands in BASIC.
+          oric_ui_state = ORIC_UI_EMULATING;
+          sys->screen_dirty = true;
+          oric_set_msg(sys->disk.inserted ? "Rebooting disk" : "Oric reset");
+          oric_reset(sys);
+          break;
+        case 6:
+          oric_status_open();
+          break;
+        case 7:
+          oric_help_open();
+          break;
+        case 8:
           oric_return_to_booster(sys);
           break;
         case ORIC_MENU_ITEMS - 1:
@@ -994,6 +1135,7 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
     switch (oric_ui_state) {
       case ORIC_UI_ROMLIST:
       case ORIC_UI_TAPELIST:
+      case ORIC_UI_DISKLIST:
       case ORIC_UI_STATUS:
       case ORIC_UI_HELP:
         oric_ui_state = ORIC_UI_MENU;
@@ -1010,7 +1152,8 @@ void __not_in_flash_func(kbd_raw_key_down)(int code) {
     (void)oric_menu_key(sys, code);
     return;
   }
-  if (oric_ui_state == ORIC_UI_ROMLIST || oric_ui_state == ORIC_UI_TAPELIST) {
+  if (oric_ui_state == ORIC_UI_ROMLIST || oric_ui_state == ORIC_UI_TAPELIST ||
+      oric_ui_state == ORIC_UI_DISKLIST) {
     (void)oric_romlist_key(sys, code);
     return;
   }
@@ -1094,7 +1237,8 @@ void __not_in_flash_func(core1_main()) {
           oric_ui_redraw = false;
           __dmb();
           if (oric_ui_state == ORIC_UI_ROMLIST ||
-              oric_ui_state == ORIC_UI_TAPELIST) {
+              oric_ui_state == ORIC_UI_TAPELIST ||
+              oric_ui_state == ORIC_UI_DISKLIST) {
             oric_list_render(&state.oric);
           } else if (oric_ui_state == ORIC_UI_STATUS) {
             oric_status_render(&state.oric);

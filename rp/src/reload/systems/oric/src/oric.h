@@ -357,7 +357,17 @@ void oric_init(oric_t* sys, const oric_desc_t* desc) {
   microdisc_init(&sys->md, &sys->wd);
   sys->wd.disk[0] = &sys->disk;
   if (sys->md_present) {
-    memset(sys->overlay_ram, 0, 0x4000);
+    // Power-on contents matter here. Sedoric's boot loader checksums the RAM
+    // under the ROM ($C980-$FFFF) and, if the sum is zero, loads only four
+    // sectors instead of the whole OS -- then runs off the end into zeros and
+    // BRKs forever at its own IRQ vector. Real DRAM is never all-zero at
+    // power-on; a memset(0) buffer is, and reproduces that hang exactly
+    // (verified in Oricutron with its RAM fill zeroed). Use the fill
+    // Oricutron gives an Atmos: 128 x 00 then 128 x FF in every page.
+    for (int i = 0; i < 0x4000; i += 256) {
+      memset(sys->overlay_ram + i, 0x00, 128);
+      memset(sys->overlay_ram + i + 128, 0xFF, 128);
+    }
   }
   _oric_md_remap(sys);
 }
