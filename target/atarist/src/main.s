@@ -48,11 +48,16 @@ LOW_BORDER_OVERSCAN_START       EQU 190
 _conterm			equ $484		; Conterm device number
 ACIA_BASE 	   		equ $fffffc00   ; Base address of the ACIA
 
-ROMCMD_START_ADDR:        equ (ROM4_ADDR + $F000)         ; The start address of the ROM commands
-CMD_KEYPRESS		   	  equ ($0BCD) 					  ; Key press
-CMD_KEYRELEASE		      equ ($0CBA) 					  ; Key release
+; m68k -> RP signalling goes through ROM3 ($FBxxxx). The RP samples every
+; ROM3 read into a DMA ring, so a read is a message and back-to-back reads
+; are safe. Values must match EMUL_ROM3_* in rp/src/include/emul.h.
+ROM3_ADDR		      	  equ $FB0000
+KEY_WINDOW_ADDR		      equ (ROM3_ADDR + $8200)		  ; + IKBD byte: bit 7 = release, low 7 bits = scancode
+BLITDONE_ADDR		      equ (ROM3_ADDR + $8400)		  ; Blit finished, RP may reuse the other buffer
+ROMCMD_START_ADDR:        equ (ROM4_ADDR + $F000)         ; Legacy: only the unused check_keys macro refers to it
+CMD_KEYPRESS		   	  equ ($0BCD) 					  ; Legacy (check_keys)
+CMD_KEYRELEASE		      equ ($0CBA) 					  ; Legacy (check_keys)
 CMD_BOOSTER		      	  equ ($0DEF) 					  ; Booster command
-CMD_BLITDONE		      equ ($0ACE)					  ; Blit finished, RP may reuse the other buffer
 
 LISTENER_ADDR		      equ (ROM4_ADDR + $5F8)		  ; RP->m68k command longword, polled once per VBL (past the code, inside the copied $1000)
 REMOTE_RESET		      equ $1					      ; The device ask to reset the
@@ -219,7 +224,12 @@ start_rom_code:
 	move.l	d0,$134.w			;Install our own Timer A (dummy)
 	move.l	d0,$114.w			;Install our own Timer C (dummy)
 	move.l	d0,$110.w			;Install our own Timer D (dummy)
-	move.l	d0,$118.w			;Install our own ACIA (dummy)
+	; The keyboard ACIA interrupts through MFP GPIP4 ($118). Reading bytes as
+	; they arrive is the only way to never miss one: the 6850 holds a single
+	; byte and the IKBD sends a burst at one byte per 1.28 ms, while Timer-B
+	; (which used to poll it) counts display-enable pulses and so cannot fire
+	; at all during the vertical blank and top border -- ~4 ms every frame.
+	move.l #(SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.acia_routine - ROM4_ADDR)),$118.w
 
 	; VBL now is a simple flag set
 	move.l #(SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.vblank_routine - ROM4_ADDR)), d0
@@ -235,6 +245,14 @@ start_rom_code:
 	move.l #(SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.timerb_routine - ROM4_ADDR)),$120.w ; Timer B interrupt vector
 	bset #0,$fffffa07        ; Interrupt Enable for Timer B (1=Enable, 0=Disable)
 	bset #0,$fffffa13        ; Interrupt Mask for Timer B (1=Unmask, 0=Mask)
+
+	; Keyboard ACIA: receive interrupt on (TOS's own setting, 8N1 /64), and
+	; the MIDI ACIA's receive interrupt off -- both share the GPIP4 line and
+	; nothing services MIDI here.
+	move.b #$96,$fffffc00.w
+	move.b #$15,$fffffc04.w
+	bset #6,$fffffa09.w      ; Interrupt Enable B: GPIP4 (ACIA)
+	bset #6,$fffffa15.w      ; Interrupt Mask B: GPIP4 (ACIA)
 	move.b	#TIMERB_COUNT_SCAN_LINES,$fffffa21.w   		; Timer B data (number of scanlines to next interrupt)
 ;	bclr #3,$fffffa17.w        ; Set Automatic End-Interrupt
 	move.b	#TIMERB_EVENT_COUNT,$fffffa1b.w			    ; Timer B control (event mode (HBL))
@@ -348,7 +366,7 @@ start_rom_code:
 	move.w #1, 4(a6)	; Next blit targets page B
 	move.b  #(SCREEN_A_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
 	move.b  #((SCREEN_A_BASE_ADDR >> 8) & $ff), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
-	tst.b (ROMCMD_START_ADDR + CMD_BLITDONE)	; Tell the RP the blit is done
+	tst.b BLITDONE_ADDR	; Tell the RP the blit is done (ROM3 read)
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 
 .fb_b:
@@ -391,7 +409,7 @@ start_rom_code:
 	clr.w 4(a6)			; Next blit targets page A
 	move.b  #(SCREEN_B_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
 	move.b  #((SCREEN_B_BASE_ADDR >> 8) & $ff), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
-	tst.b (ROMCMD_START_ADDR + CMD_BLITDONE)	; Tell the RP the blit is done
+	tst.b BLITDONE_ADDR	; Tell the RP the blit is done (ROM3 read)
 
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 
@@ -400,31 +418,27 @@ start_rom_code:
 	beq.s .start_overscan
 
 .no_overscan:
-	btst #0, ACIA_BASE.w
-	bne.s .timerb_key
-	bclr    #0, $fffffa0f            ; tell ST interrupt is done
-	rte
-
-.timerb_key:
-	movem.l d0/a0,-(sp)
-	move.l #(ROMCMD_START_ADDR), a0 ; Start address of the ROM3
-	move.b (ACIA_BASE + 2).w, d0		; Read the ACIA status register
-	and.w #$FF, d0
-	btst #7, d0
-	bne.s .timerb_break_code_key
-
-	tst.b (ROMCMD_START_ADDR + CMD_KEYPRESS)  ; Command
-	tst.b (a0, d0.w)             ; Key press
-	movem.l (sp)+, d0/a0
-	bclr    #0, $fffffa0f            ; tell ST interrupt is done
-	rte
-
-.timerb_break_code_key:
-	tst.b (ROMCMD_START_ADDR + CMD_KEYRELEASE)  ; Command
-	tst.b (a0, d0.w)             ; Key released
-	movem.l (sp)+, d0/a0
 	bclr    #0, $fffffa0f            ; tell ST interrupt is done
 .dummy:
+	rte
+
+; Keyboard ACIA receive interrupt (MFP GPIP4). One cart read per IKBD byte:
+; the byte itself is the address offset and bit 7 already says press or
+; release, so there is no command word to pair with. Drains every byte the
+; ACIA holds before ending the interrupt, since the line is level-sensitive.
+.acia_routine:
+	movem.l d0/a0,-(sp)
+	lea KEY_WINDOW_ADDR, a0
+.acia_next:
+	btst #0, ACIA_BASE.w         ; RDRF: a byte is waiting
+	beq.s .acia_done
+	moveq #0, d0
+	move.b (ACIA_BASE + 2).w, d0 ; Read the IKBD byte (clears RDRF)
+	tst.b (a0, d0.w)             ; Emit it
+	bra.s .acia_next
+.acia_done:
+	movem.l (sp)+, d0/a0
+	bclr    #6, $fffffa11.w      ; ISRB: ACIA interrupt serviced
 	rte
 
 .start_overscan:
@@ -445,7 +459,13 @@ start_rom_code:
 	endr
 	move.b	#2,$ffff820a.w	; LineCycles=500-508
 
-	clr.b $fffffa1b.w		   ; Stop Timer B
+	; Keep polling the keyboard through the bottom border and the vertical
+	; blank. This used to stop Timer B here until the VBL re-armed it, which
+	; left ~4 ms per frame with nobody reading the ACIA: the IKBD delivers a
+	; byte every 1.28 ms in a burst and the ACIA buffers two, so a fast roll
+	; overran it and a key event -- often a release -- was lost.
+	move.l #(SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.timerb_routine - ROM4_ADDR)),$120.w
+	move.b	#TIMERB_COUNT_SCAN_LINES,$fffffa21.w
 	bclr    #0, $fffffa0f      ; tell ST interrupt is done
 	rte
 
