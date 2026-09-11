@@ -784,6 +784,39 @@ void oric_show_msg(oric_t* sys, const char* msg) {
 // own position, so it costs a couple of rows out of 224 and only while the
 // motor is running.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Boot hint. "Press F1 for config menu" over the middle of the Oric screen
+// while the machine starts, so the menu is discoverable without the README.
+// Drawn into the framebuffer after the conversion, like the tape band, so the
+// Oric screen underneath is untouched.
+// ---------------------------------------------------------------------------
+#define ORIC_HINT_ROWS 8
+static volatile bool oric_boot_hint_active;
+
+static void __not_in_flash_func(_oric_draw_boot_hint)(uint16_t* restrict fb) {
+  if (!oric_boot_hint_active) {
+    return;
+  }
+  static const char kHint[] = "Press F1 for config menu";
+  const int len = (int)(sizeof(kHint) - 1);
+  const int start_x = (ORIC_SCREEN_WIDTH - (len * 8)) / 2;
+  const int top = (ORIC_SCREEN_HEIGHT - ORIC_HINT_ROWS) / 2;
+  for (int r = 0; r < ORIC_HINT_ROWS; r++) {
+    memset(line_buff, 0, sizeof(line_buff));
+    for (int i = 0; i < len; i++) {
+      const uint8_t bits = oric_glyph_row(kHint[i], r);
+      for (int b = 0; b < 8; b++) {
+        const int x = start_x + i * 8 + b;
+        if (x >= 0 && x < ORIC_SCREEN_WIDTH && (bits & (1u << b))) {
+          line_buff[x] = 7;  // white
+        }
+      }
+    }
+    _oric_pack_line(fb + ((top + r) * ATARI_ST_FRAMEBUFFER_LINE_SIZE_16WORDS),
+                    line_buff);
+  }
+}
+
 #define ORIC_TAPE_BAR_ROWS 2
 #define ORIC_TAPE_MSG_ROWS 8
 
@@ -927,6 +960,7 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
   sys->pattr = pattr;
 
   _oric_draw_tape_band(sys, fb);
+  _oric_draw_boot_hint(fb);
 
   sys->fb_frame_counter = next_count;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;
