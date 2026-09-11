@@ -73,6 +73,7 @@
 #include "chips/mos6522via.h"
 #include "constants.h"
 #include "devices/oric_microdisc.h"
+#include "oric_qr_docs.h"
 #include "devices/oric_td.h"
 
 #ifdef __cplusplus
@@ -122,6 +123,15 @@ extern uint8_t oric_rom[ORIC_ROM_SIZE];
 #define ATARI_ST_LISTENER_OFFSET 0x05F8
 #define ATARI_ST_REMOTE_RESET 1u
 
+// RP->m68k boot status, read once by the cartridge before it commits to
+// running the emulator. Without a card there is no ROM, so the cart code
+// prints a line and returns to GEM -- the same exit as the resolution check.
+// 16-bit, so the bus byte-swap within a word is transparent (as for the
+// frame counter). Must match BOOTSTATUS_ADDR / BOOT_NO_SDCARD in main.s.
+#define ATARI_ST_BOOTSTATUS_OFFSET 0x05FC
+#define ATARI_ST_BOOT_OK 0u
+#define ATARI_ST_BOOT_NO_SDCARD 1u
+
 // The cart bus swaps bytes within each 16-bit word, which makes uint16_t
 // transparent -- but an m68k move.l is two word reads in (high, low) order
 // while the halves stay in their RP positions, so a uint32_t arrives with its
@@ -142,9 +152,13 @@ static inline uint32_t _oric_as_m68k_long(uint32_t v) {
   (ATARI_ST_FRAMEBUFFERS_OFFSET + ATARI_ST_FRAMEBUFFER_SIZE_BYTES)
 // SAFEGUARD END
 
-// The Microdisc EPROM's fixed name in the content folder (D-17). The ROM
-// picker skips it; its presence is what makes the controller exist.
+// Names accepted for the Microdisc EPROM in the content folder. The
+// ROM picker skips them; the file's presence is what makes the controller
+// exist. Two spellings because the copies in circulation disagree: our docs
+// say microdisc.rom, while Oricutron and the MiSTer core ship the 8.3 name
+// MICRODIS.ROM. Matching is case-insensitive, so only the stems differ.
 #define ORIC_MICRODISC_ROM_NAME "microdisc.rom"
+#define ORIC_MICRODISC_ROM_ALT "microdis.rom"
 
 // Config parameters for oric_init()
 typedef struct {
@@ -186,9 +200,14 @@ typedef struct {
 
   volatile bool screen_dirty;
 
+  // A video mode the CPU wrote but the frame scan may never see. Core 0
+  // sets these, Core 1 consumes them at the start of a frame.
+  volatile uint8_t pattr_pending;
+  volatile bool pattr_pending_valid;
+
   oric_td_t td;  // Tape drive
 
-  // Microdisc floppy controller (EPIC-07). md_present is false when no
+  // Microdisc floppy controller. md_present is false when no
   // microdisc.rom was found; the registers then read as they did before.
   bool md_present;
   oric_wd17xx_t wd;
@@ -258,6 +277,9 @@ void oric_ovl_clear(uint8_t attr);
 void oric_ovl_text(int col, int row, const char* str, uint8_t attr);
 void oric_ovl_fill(int col, int row, int ncols, uint8_t attr);
 void oric_ovl_present(oric_t* sys);
+// Overlay the docs QR code on the current frame, centred horizontally with
+// its top at `y0`. Call it after oric_ovl_present().
+void oric_ovl_qr(oric_t* sys, int y0);
 void oric_ayQueuePush(uint16_t* queue, uint16_t* head, uint16_t value);
 
 #ifdef __cplusplus
@@ -311,6 +333,16 @@ static void _oric_overlay_power_on(oric_t* sys) {
   }
 }
 
+// Would the ULA scan this address in the mode it is in now? Text reads the
+// text screen; hires reads the bitmap plus the three text rows below it.
+static inline bool _oric_ula_scans(const oric_t* sys, uint16_t addr) {
+  if (sys->pattr & PATTR_HIRES) {
+    return (addr >= 0xA000 && addr < 0xBF40) ||
+           (addr >= 0xBF68 && addr <= 0xBFDF);
+  }
+  return addr >= 0xBB80 && addr <= 0xBFDF;
+}
+
 static void _oric_md_remap(oric_t* sys) {
   if (!sys->md_present || !sys->md.romdis) {
     mem_map_rom(&sys->mem, 0, 0xC000, 0x4000, sys->rom);
@@ -358,13 +390,15 @@ void oric_init(oric_t* sys, const oric_desc_t* desc) {
 
   sys->blink_counter = 0;
   sys->pattr = 0;
+  sys->pattr_pending = 0;
+  sys->pattr_pending_valid = false;
 
   // Optionally setup tape drive
   if (desc->td_enabled) {
     oric_td_init(&sys->td);
   }
 
-  // Microdisc, present only with its EPROM (D-17)
+  // Microdisc, present only with its EPROM
   sys->md_present = desc->roms.microdisc_rom.ptr &&
                     (desc->roms.microdisc_rom.size == ORIC_MD_ROM_BYTES) &&
                     desc->overlay_ram && desc->md_track;
@@ -411,9 +445,9 @@ void oric_reset(oric_t* sys) {
     oric_td_reset(&sys->td);
   }
   // Microdisc: a real one holds ROMDIS at power-on so its EPROM boots the
-  // machine -- and with no disk in the drive it then just sits there. D-17:
-  // assert ROMDIS only when a disk is inserted, so a disk-less power-on still
-  // lands in BASIC exactly as before.
+  // machine -- and with no disk in the drive it then just sits there, which
+  // would be a regression for everyone using tapes. So assert ROMDIS only
+  // when a disk is inserted: a disk-less power-on still lands in BASIC.
   microdisc_init(&sys->md, &sys->wd);
   sys->wd.disk[0] = &sys->disk;
   sys->md.romdis = sys->md_present && sys->disk.inserted;
@@ -478,6 +512,19 @@ static void __not_in_flash_func(_oric_mem_rw)(oric_t* sys, uint16_t addr,
 
       if (addr >= 0x9800 && addr <= 0xBFDF) {
         sys->screen_dirty = true;
+        // A mode attribute takes effect when the ULA scans it, which on real
+        // hardware is within the same frame as the write. Core 1 renders a
+        // whole-frame snapshot instead, so an attribute the program
+        // overwrites straight away is never seen -- and "switch to HIRES,
+        // then fill $A000-$BF3F" does exactly that, because $BB80 is inside
+        // the fill. The mode would be lost for good. Latch it here, on the
+        // write. Attributes that stay in memory still come from the frame
+        // scan, so a mid-screen mode change is unaffected.
+        const uint8_t v = MOS6502CPU_GET_DATA(&sys->cpu);
+        if ((v & 0x78) == 0x18 && _oric_ula_scans(sys, addr)) {
+          sys->pattr_pending = v & 7;
+          sys->pattr_pending_valid = true;
+        }
       }
     }
   }
@@ -754,6 +801,86 @@ void oric_show_msg(oric_t* sys, const char* msg) {
 // own position, so it costs a couple of rows out of 224 and only while the
 // motor is running.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Boot hint. "Press F1 for config menu" over the middle of the Oric screen
+// while the machine starts, so the menu is discoverable without the README.
+// Drawn into the framebuffer after the conversion, like the tape band, so the
+// Oric screen underneath is untouched.
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Docs QR code. Drawn into the framebuffer like the tape band, straight from
+// the pre-computed bitmap -- dark modules on a light field, with the quiet
+// zone the spec requires, because a code without it will not scan.
+// ---------------------------------------------------------------------------
+#define ORIC_QR_QUIET 4  // modules of light border, per the QR spec
+#define ORIC_QR_SCALE 2  // screen pixels per module
+#define ORIC_QR_SIDE_PX \
+  ((ORIC_QR_MODULES + 2 * ORIC_QR_QUIET) * ORIC_QR_SCALE)
+
+// Draw the code with its top-left at (x0, y0). Everything else on those
+// scanlines is blacked out: _oric_pack_line rewrites a whole line, so the
+// caller must place this where no text is.
+static void __not_in_flash_func(_oric_draw_qr)(uint16_t* restrict fb, int x0,
+                                               int y0) {
+  for (int py = 0; py < ORIC_QR_SIDE_PX; py++) {
+    const int y = y0 + py;
+    if (y < 0 || y >= ORIC_SCREEN_HEIGHT) {
+      continue;
+    }
+    memset(line_buff, 0, sizeof(line_buff));
+    // The module row under this scanline, or -1 while inside the quiet zone.
+    const int mrow = (py / ORIC_QR_SCALE) - ORIC_QR_QUIET;
+    for (int px = 0; px < ORIC_QR_SIDE_PX; px++) {
+      const int x = x0 + px;
+      if (x < 0 || x >= ORIC_SCREEN_WIDTH) {
+        continue;
+      }
+      const int mcol = (px / ORIC_QR_SCALE) - ORIC_QR_QUIET;
+      uint8_t dark = 0;
+      if (mrow >= 0 && mrow < ORIC_QR_MODULES && mcol >= 0 &&
+          mcol < ORIC_QR_MODULES) {
+        const uint8_t bits = oric_qr_docs[mrow * ORIC_QR_STRIDE + (mcol >> 3)];
+        dark = (bits >> (7 - (mcol & 7))) & 1u;
+      }
+      line_buff[x] = dark ? 0 : 7;  // black modules on white
+    }
+    _oric_pack_line(fb + (y * ATARI_ST_FRAMEBUFFER_LINE_SIZE_16WORDS),
+                    line_buff);
+  }
+}
+
+void oric_ovl_qr(oric_t* sys, int y0) {
+  CHIPS_ASSERT(sys && sys->valid);
+  _oric_draw_qr(sys->fb, (ORIC_SCREEN_WIDTH - ORIC_QR_SIDE_PX) / 2, y0);
+}
+
+#define ORIC_HINT_ROWS 8
+static volatile bool oric_boot_hint_active;
+
+static void __not_in_flash_func(_oric_draw_boot_hint)(uint16_t* restrict fb) {
+  if (!oric_boot_hint_active) {
+    return;
+  }
+  static const char kHint[] = "Press F1 for config menu";
+  const int len = (int)(sizeof(kHint) - 1);
+  const int start_x = (ORIC_SCREEN_WIDTH - (len * 8)) / 2;
+  const int top = (ORIC_SCREEN_HEIGHT - ORIC_HINT_ROWS) / 2;
+  for (int r = 0; r < ORIC_HINT_ROWS; r++) {
+    memset(line_buff, 0, sizeof(line_buff));
+    for (int i = 0; i < len; i++) {
+      const uint8_t bits = oric_glyph_row(kHint[i], r);
+      for (int b = 0; b < 8; b++) {
+        const int x = start_x + i * 8 + b;
+        if (x >= 0 && x < ORIC_SCREEN_WIDTH && (bits & (1u << b))) {
+          line_buff[x] = 7;  // white
+        }
+      }
+    }
+    _oric_pack_line(fb + ((top + r) * ATARI_ST_FRAMEBUFFER_LINE_SIZE_16WORDS),
+                    line_buff);
+  }
+}
+
 #define ORIC_TAPE_BAR_ROWS 2
 #define ORIC_TAPE_MSG_ROWS 8
 
@@ -811,7 +938,15 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
   bool blink_state = (sys->blink_counter & 0x20) != 0;
   sys->blink_counter = (sys->blink_counter + 1) & 0x3F;
 
+  // A mode the CPU latched since the last frame wins over the one the last
+  // frame ended in. Clearing the flag first means a mode written while this
+  // frame renders is picked up by the next one rather than being dropped.
   uint8_t pattr = sys->pattr;
+  if (sys->pattr_pending_valid) {
+    sys->pattr_pending_valid = false;
+    __dmb();
+    pattr = sys->pattr_pending;
+  }
   uint8_t* restrict ram = sys->ram;
 
   uint16_t next_count = (uint16_t)(sys->fb_frame_counter + 1u);
@@ -889,6 +1024,7 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
   sys->pattr = pattr;
 
   _oric_draw_tape_band(sys, fb);
+  _oric_draw_boot_hint(fb);
 
   sys->fb_frame_counter = next_count;
   uint8_t* fb_base = (uint8_t*)&__rom_in_ram_start__;

@@ -14,6 +14,9 @@ fi
 echo "Copy version.txt to each project"
 cp version.txt rp/
 cp version.txt target/
+# The m68k Makefile reads its own copy, which used to drift: it still said
+# 0.0.1dev while everything else carried the release version.
+cp version.txt target/atarist/
 
 # Display the version information
 export VERSION=$(cat version.txt)

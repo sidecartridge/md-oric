@@ -123,7 +123,7 @@ uint16_t __not_in_flash_func(kbdmap_StGsx2Ascii)(uint16_t scan_code,
 }
 
 void kbdmap_initOric(void) {
-  // F1 only: it opens and closes the on-screen menu (D-16). F2..F10 are left
+  // F1 only: it opens and closes the on-screen menu. F2..F10 are left
   // unmapped so they reach the Oric as nothing -- it has no function keys --
   // now that loading goes through the menu instead of F-key-by-index.
   kbdmap_st_gsx_to_ascii[0x3B][0] = 0x13A;
@@ -135,7 +135,7 @@ void kbdmap_initOric(void) {
   kbdmap_st_gsx_to_ascii[0x62][0] = 0x145;
   kbdmap_st_gsx_to_ascii[0x62][1] = 0x145;
 
-  // ST HOME: conversion-timing readout (EPIC-03 STORY-01). Unmapped before,
+  // ST HOME: conversion-timing readout. Unmapped before,
   // and 0x146/0x147 are ORIC_KEY_CTRL/SHIFT, so the debug keycode is 0x148.
   kbdmap_st_gsx_to_ascii[0x47][0] = 0x148;
   kbdmap_st_gsx_to_ascii[0x47][1] = 0x148;
