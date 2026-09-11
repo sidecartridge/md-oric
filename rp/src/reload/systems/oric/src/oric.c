@@ -766,6 +766,7 @@ static void oric_status_render(oric_t* sys) {
     (void)snprintf(line, sizeof(line), "DISK: %s",
                    oric_disk_name[0] ? oric_disk_name : "Microdisc, no disk");
     oric_ovl_text(2, 8, line, ORIC_ATTR_NORMAL);
+    oric_ovl_text(2, 9, "Disk support is experimental", ORIC_ATTR_DIM);
   }
 
   // Conversion timing. Nothing is converted while this screen is up -- Core 1
@@ -851,30 +852,30 @@ static void oric_help_render(oric_t* sys) {
   oric_ovl_clear(ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 1, "HELP", ORIC_ATTR_NORMAL);
 
-  oric_ovl_text(2, 3, "Menu", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 3, "Menu keys", ORIC_ATTR_DIM);
   oric_ovl_text(2, 4, "F1      open the menu", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 5, "ESC     back / close", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 6, "Up/Dn   move", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 7, "L/R     page a list", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 8, "Return  choose", ORIC_ATTR_NORMAL);
 
-  oric_ovl_text(2, 10, "Oric", ORIC_ATTR_DIM);
-  oric_ovl_text(2, 11, "HELP    reset the Oric", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 10, "Oric keys", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 11, "HELP    soft reset", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 12, "UNDO    break (NMI)", ORIC_ATTR_NORMAL);
   oric_ovl_text(2, 13, "HOME    show timing", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 14, "Every other key is the", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 15, "Oric's own.", ORIC_ATTR_DIM);
 
-  oric_ovl_text(2, 15, "Loading a tape", ORIC_ATTR_DIM);
-  oric_ovl_text(2, 16, "F1, SELECT TAPE, pick a", ORIC_ATTR_NORMAL);
-  oric_ovl_text(2, 17, "file, then type CLOAD\"\"", ORIC_ATTR_NORMAL);
-  oric_ovl_text(2, 18, "at the BASIC prompt.", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 17, "Load a tape", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 18, "SELECT TAPE, pick a file,", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 19, "then CLOAD\"\" at the prompt", ORIC_ATTR_NORMAL);
 
-  oric_ovl_text(2, 20, "Changing the ROM", ORIC_ATTR_DIM);
-  oric_ovl_text(2, 21, "F1, SELECT ROM, pick one.", ORIC_ATTR_NORMAL);
-  oric_ovl_text(2, 22, "The emulator reboots.", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 21, "Boot a disk (experimental)", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 22, "SELECT DISK, pick a file.", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 23, "Needs microdisc.rom.", ORIC_ATTR_NORMAL);
 
-  oric_ovl_text(2, 24, "Disk: SELECT DISK boots it.", ORIC_ATTR_NORMAL);
-
-  oric_ovl_text(2, 25, "ESC=BACK", ORIC_ATTR_DIM);
+  oric_ovl_text(2, 25, "RESET ORIC  power cycle", ORIC_ATTR_NORMAL);
+  oric_ovl_text(2, 26, "ESC=BACK", ORIC_ATTR_DIM);
   oric_ovl_present(sys);
 }
 
@@ -889,6 +890,7 @@ static void oric_status_open(void) {
 }
 
 static void oric_menu_open(void) {
+  oric_boot_hint_active = false;  // it has served its purpose
   oric_menu_sel = 0;
   oric_ui_repaint();
   oric_ui_state = ORIC_UI_MENU;
@@ -960,6 +962,13 @@ static bool oric_menu_key(oric_t* sys, int code) {
   }
 }
 
+
+// How long the "Press F1 for config menu" hint stays up. Long enough to read
+// while the Oric boots; it goes early if the menu is opened.
+#ifndef ORIC_BOOT_HINT_SECONDS
+#define ORIC_BOOT_HINT_SECONDS 5u
+#endif
+static volatile uint32_t oric_boot_hint_until_us;
 
 #ifndef ORIC_MSG_DISPLAY_SECONDS
 #define ORIC_MSG_DISPLAY_SECONDS 3u
@@ -1260,6 +1269,15 @@ void __not_in_flash_func(core1_main()) {
         next_update_us = now_us + 19968;
         continue;
       }
+      // The boot hint sits over the Oric screen while the machine starts.
+      // The Oric writes nothing to screen RAM for most of that time, so force
+      // the repaint; one more when it expires takes the hint back off.
+      if (oric_boot_hint_active) {
+        if ((int32_t)(now_us - oric_boot_hint_until_us) >= 0) {
+          oric_boot_hint_active = false;
+        }
+        state.oric.screen_dirty = true;
+      }
       uint32_t until_us = oric_msg_until_us;
       if (until_us != 0 && (int32_t)(until_us - now_us) > 0) {
         // oric_msg_buf is written by Core 0 and is not volatile, so without a
@@ -1465,6 +1483,11 @@ int __not_in_flash_func(oric_main)() {
   // not read a leftover reset command on its first VBL.
   *((volatile uint32_t*)((uint8_t*)&__rom_in_ram_start__ + ATARI_ST_LISTENER_OFFSET)) = 0;
 
+  // Show the hint from the moment the screen is live until the Oric has
+  // booted and drawn its own display over it.
+  oric_boot_hint_until_us = time_us_32() + (ORIC_BOOT_HINT_SECONDS * 1000000u);
+  oric_boot_hint_active = true;
+
   multicore_launch_core1(core1_main);
 
   uint32_t num_ticks = 19968;
@@ -1482,7 +1505,6 @@ int __not_in_flash_func(oric_main)() {
     oric_disk_idle_flush(&state.oric);
 
     oric_rom3_drain();
-    // oric_screen_update(&state.oric);
     kbd_update(&state.oric.kbd, num_ticks);
 
     uint32_t end_time_in_micros = time_us_32();
