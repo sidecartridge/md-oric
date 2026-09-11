@@ -186,6 +186,11 @@ typedef struct {
 
   volatile bool screen_dirty;
 
+  // A video mode the CPU wrote but the frame scan may never see. Core 0
+  // sets these, Core 1 consumes them at the start of a frame.
+  volatile uint8_t pattr_pending;
+  volatile bool pattr_pending_valid;
+
   oric_td_t td;  // Tape drive
 
   // Microdisc floppy controller (EPIC-07). md_present is false when no
@@ -311,6 +316,16 @@ static void _oric_overlay_power_on(oric_t* sys) {
   }
 }
 
+// Would the ULA scan this address in the mode it is in now? Text reads the
+// text screen; hires reads the bitmap plus the three text rows below it.
+static inline bool _oric_ula_scans(const oric_t* sys, uint16_t addr) {
+  if (sys->pattr & PATTR_HIRES) {
+    return (addr >= 0xA000 && addr < 0xBF40) ||
+           (addr >= 0xBF68 && addr <= 0xBFDF);
+  }
+  return addr >= 0xBB80 && addr <= 0xBFDF;
+}
+
 static void _oric_md_remap(oric_t* sys) {
   if (!sys->md_present || !sys->md.romdis) {
     mem_map_rom(&sys->mem, 0, 0xC000, 0x4000, sys->rom);
@@ -358,6 +373,8 @@ void oric_init(oric_t* sys, const oric_desc_t* desc) {
 
   sys->blink_counter = 0;
   sys->pattr = 0;
+  sys->pattr_pending = 0;
+  sys->pattr_pending_valid = false;
 
   // Optionally setup tape drive
   if (desc->td_enabled) {
@@ -478,6 +495,19 @@ static void __not_in_flash_func(_oric_mem_rw)(oric_t* sys, uint16_t addr,
 
       if (addr >= 0x9800 && addr <= 0xBFDF) {
         sys->screen_dirty = true;
+        // A mode attribute takes effect when the ULA scans it, which on real
+        // hardware is within the same frame as the write. Core 1 renders a
+        // whole-frame snapshot instead, so an attribute the program
+        // overwrites straight away is never seen -- and "switch to HIRES,
+        // then fill $A000-$BF3F" does exactly that, because $BB80 is inside
+        // the fill. The mode would be lost for good. Latch it here, on the
+        // write. Attributes that stay in memory still come from the frame
+        // scan, so a mid-screen mode change is unaffected.
+        const uint8_t v = MOS6502CPU_GET_DATA(&sys->cpu);
+        if ((v & 0x78) == 0x18 && _oric_ula_scans(sys, addr)) {
+          sys->pattr_pending = v & 7;
+          sys->pattr_pending_valid = true;
+        }
       }
     }
   }
@@ -811,7 +841,15 @@ int __not_in_flash_func(oric_screen_update)(oric_t* sys) {
   bool blink_state = (sys->blink_counter & 0x20) != 0;
   sys->blink_counter = (sys->blink_counter + 1) & 0x3F;
 
+  // A mode the CPU latched since the last frame wins over the one the last
+  // frame ended in. Clearing the flag first means a mode written while this
+  // frame renders is picked up by the next one rather than being dropped.
   uint8_t pattr = sys->pattr;
+  if (sys->pattr_pending_valid) {
+    sys->pattr_pending_valid = false;
+    __dmb();
+    pattr = sys->pattr_pending;
+  }
   uint8_t* restrict ram = sys->ram;
 
   uint16_t next_count = (uint16_t)(sys->fb_frame_counter + 1u);
