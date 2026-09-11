@@ -23,6 +23,12 @@ firmware (`rp/`) and target-computer firmware (`target/atarist/`).
 This emulator is based on the [Reload Emulator](https://github.com/vsladkov/reload-emulator)
 project by Veselin Sladkov. **Huge thanks** for his great work!
 
+The floppy disk controller — WD1793 and Microdisc — is ported from
+[Oricutron](https://github.com/pete-gordon/oricutron) by Peter Gordon and
+contributors, used with his specific permission
+([oricutron#216](https://github.com/pete-gordon/oricutron/issues/216)).
+Thanks to Pete and the Oricutron team.
+
 ## ⚠️ Attention
 
 This emulator is designed **only for low-resolution monitors**. It will **not**
@@ -54,6 +60,13 @@ online; search for "orica.zip" or similar, or see the
 **Tapes.** Copy `.tap` files to the same directory. Any filename works — you
 pick them from a menu, so there is no naming convention to remember.
 
+**Disks (optional).** To use disk images you need the Oric **Microdisc ROM**:
+an 8 KB file, copied to the same directory under the exact name
+`microdisc.rom`. It is deliberately not shown in the ROM menu — it is the disk
+controller's EPROM, not a BASIC ROM. Then copy `.dsk` images alongside it. They
+must be in the **MFM_DISK** format used by Oricutron and Euphoric (the common
+format on oric.org); other `.dsk` flavours are refused with a message.
+
 That is all the setup there is. Subdirectories, hidden files and system files
 are ignored, so a card written from macOS or Windows will not show stray
 entries.
@@ -79,8 +92,11 @@ Press **F1** at any time to open the menu:
 | --- | --- |
 | **SELECT ROM** | Choose a different ROM and restart with it |
 | **SELECT TAPE** | Insert a `.tap` into the virtual cassette drive |
-| **EJECT TAPE** | Remove the current tape |
-| **STATUS** | Version, current ROM and tape, and emulator timing |
+| **EJECT TAPE** | Remove the current tape (shown only while one is inserted) |
+| **SELECT DISK (EXPERIMENTAL)** | Insert a `.dsk` and boot it — the Oric resets with the Microdisc ROM active, the way a real one boots with a disk in the drive |
+| **EJECT DISK (EXPERIMENTAL)** | Remove the current disk; the Oric keeps running (shown only while one is inserted) |
+| **RESET ORIC** | Same as the HELP key: reboots the disk if one is inserted, otherwise back to BASIC |
+| **STATUS** | Version, current ROM, tape and disk, and emulator timing |
 | **HELP** | The keys and how to load a tape or change the ROM, on screen |
 | **RETURN TO BOOSTER** | Leave the emulator and cold-boot the ST into the Booster app |
 | **RESUME** | Back to the Oric |
@@ -161,8 +177,8 @@ Done since the first release:
 Still open:
 
 - [ ] Joystick/gamepad support.
-- [ ] Floppy disk support. It was removed to save CPU cycles, and the
-  conversion work above has bought back some of the budget it needs.
+- [x] Floppy disk support — a Microdisc with a WD1793, so standard `.dsk`
+  images boot. One drive; the disk is read a track at a time from the card.
 - [ ] Further performance improvements.
 
 ## License
@@ -171,3 +187,9 @@ This project is released under the GNU General Public License v3.0. See the [LIC
 
 Note: the original Reload Emulator repository does not display a license, so I
 do not know what license to attribute for that upstream code.
+
+The disk controller code in `rp/src/reload/devices/oric_microdisc.h` is ported
+from Oricutron, which is GPL version 2 only. It is used here under a specific
+permission from its author, Peter Gordon
+([oricutron#216](https://github.com/pete-gordon/oricutron/issues/216)); his
+copyright notice and the list of contributors are kept in that file.
