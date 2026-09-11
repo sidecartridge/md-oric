@@ -51,7 +51,7 @@ void emul_start() {
   // sampled by its own PIO state machine straight into a 32 KB DMA ring,
   // which Core 0 drains. No interrupt, so two back-to-back reads can never
   // overwrite each other -- the way the old per-read DMA IRQ lost key
-  // events (EPIC-08 STORY-01). Ported from md-framebuffer-template.
+  // events. Ported from md-framebuffer-template.
   if (commemul_init() < 0) {
     panic("commemul_init failed");
   }

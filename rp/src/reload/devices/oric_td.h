@@ -50,7 +50,7 @@ void oric_td_tick_sdcard(oric_td_t* sys);
 
 // Insert a new tape file from SD card
 // SAFEGUARD: takes a filename, not an F-key index -- the menu chooses the
-// file now (EPIC-05). The .tap is played directly, generated as it goes.
+// file now. The .tap is played directly, generated as it goes.
 bool oric_td_insert_tape_sdcard(oric_td_t* sys, const char* filename);
 
 // Remove the tape file from SD card
