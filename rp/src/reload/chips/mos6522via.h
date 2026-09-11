@@ -296,6 +296,19 @@ static inline void _mos6522via_write_ier(mos6522via_t* c, uint8_t data) {
   } else {
     c->intr.ier &= ~(data & 0x7F);
   }
+  // SAFEGUARD START: the IRQ output follows IER, not just IFR
+  // On the real chip IRQ is (IFR & IER & $7F) != 0, recomputed continuously.
+  // Upstream only recomputed it when IFR changed, so disabling an interrupt
+  // whose flag was already set left IFR bit 7 -- and the IRQ line -- stuck
+  // until the flag itself was cleared. Sedoric masks the VIA (IER <- $7F)
+  // before every disk transfer; a pending T1 then produced a spurious IRQ
+  // that its handler passed to the ROM, losing the Microdisc's INTENA on the
+  // way, and every sector read hung waiting for an interrupt that never came.
+  if (0 == (c->intr.ifr & c->intr.ier & 0x7F)) {
+    c->intr.ifr &= 0x7F;
+    _MOS6522VIA_PIP_RESET(c->intr.pip, MOS6522VIA_PIP_IRQ);
+  }
+  // SAFEGUARD END
 }
 
 static inline void _mos6522via_write_ifr(mos6522via_t* c, uint8_t data) {
