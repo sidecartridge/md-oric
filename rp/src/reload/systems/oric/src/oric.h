@@ -218,6 +218,11 @@ void oric_init(oric_t* sys, const oric_desc_t* desc);
 void oric_discard(oric_t* sys);
 // Reset a Oric instance
 void oric_reset(oric_t* sys);
+// Power-cycle semantics: RAM cleared and re-patterned, then reset. A soft
+// reset keeps RAM, and the Atmos ROM then does a warm start that preserves
+// whatever page-2 hooks a DOS left behind -- pointing into RAM that is now
+// hidden behind the BASIC ROM, so the tape routines never come back.
+void oric_cold_reset(oric_t* sys);
 
 void oric_tick(oric_t* sys);
 
@@ -289,6 +294,23 @@ static uint8_t oric_glyph_row(char c, int row);
 //   romdis clear : $C000-$FFFF is the BASIC ROM, writes dropped
 //   romdis set   : $C000-$FFFF is overlay RAM, except that while diskrom is
 //                  set the EPROM reads at $E000-$FFFF (writes there dropped)
+// Power-on contents of the RAM under the ROM matter. Sedoric's boot loader
+// checksums $C980-$FFFF and, if the sum is zero, loads only four sectors
+// instead of the whole OS -- then runs off the end into zeros and BRKs
+// forever at its own IRQ vector. Real DRAM is never all-zero at power-on; a
+// memset(0) buffer is, and reproduces that hang exactly (verified in
+// Oricutron with its RAM fill zeroed). Use the fill Oricutron gives an
+// Atmos: 128 x 00 then 128 x FF in every page.
+static void _oric_overlay_power_on(oric_t* sys) {
+  if (!sys->md_present) {
+    return;
+  }
+  for (int i = 0; i < 0x4000; i += 256) {
+    memset(sys->overlay_ram + i, 0x00, 128);
+    memset(sys->overlay_ram + i + 128, 0xFF, 128);
+  }
+}
+
 static void _oric_md_remap(oric_t* sys) {
   if (!sys->md_present || !sys->md.romdis) {
     mem_map_rom(&sys->mem, 0, 0xC000, 0x4000, sys->rom);
@@ -356,19 +378,7 @@ void oric_init(oric_t* sys, const oric_desc_t* desc) {
   sys->disk.cachedside = -1;
   microdisc_init(&sys->md, &sys->wd);
   sys->wd.disk[0] = &sys->disk;
-  if (sys->md_present) {
-    // Power-on contents matter here. Sedoric's boot loader checksums the RAM
-    // under the ROM ($C980-$FFFF) and, if the sum is zero, loads only four
-    // sectors instead of the whole OS -- then runs off the end into zeros and
-    // BRKs forever at its own IRQ vector. Real DRAM is never all-zero at
-    // power-on; a memset(0) buffer is, and reproduces that hang exactly
-    // (verified in Oricutron with its RAM fill zeroed). Use the fill
-    // Oricutron gives an Atmos: 128 x 00 then 128 x FF in every page.
-    for (int i = 0; i < 0x4000; i += 256) {
-      memset(sys->overlay_ram + i, 0x00, 128);
-      memset(sys->overlay_ram + i + 128, 0xFF, 128);
-    }
-  }
+  _oric_overlay_power_on(sys);
   _oric_md_remap(sys);
 }
 
@@ -386,6 +396,13 @@ void oric_nmi(oric_t* sys) {
   MOS6502CPU_NMI(&sys->cpu);
 }
 
+void oric_cold_reset(oric_t* sys) {
+  CHIPS_ASSERT(sys && sys->valid);
+  memset(sys->ram, 0, sizeof(sys->ram));
+  _oric_overlay_power_on(sys);
+  oric_reset(sys);
+}
+
 void oric_reset(oric_t* sys) {
   CHIPS_ASSERT(sys && sys->valid);
   mos6522via_reset(&sys->via);
@@ -401,6 +418,13 @@ void oric_reset(oric_t* sys) {
   sys->wd.disk[0] = &sys->disk;
   sys->md.romdis = sys->md_present && sys->disk.inserted;
   _oric_md_remap(sys);
+  // Let go of every key the matrix thinks is held. A stuck slot is an
+  // emulator artefact, not machine state, and a reset is where a user
+  // expects it to clear.
+  for (int i = 0; i < KBD_MAX_PRESSED_KEYS; i++) {
+    sys->kbd.key_buffer[i] = (key_state_t){0};
+  }
+  kbd_update(&sys->kbd, 0);
   MOS6502CPU_RESET(&sys->cpu);
 }
 
@@ -957,6 +981,7 @@ static void _oric_init_key_map(oric_t* sys) {
   kbd_register_key(&sys->kbd, 0x152, 3, 4, 0);  // Up
   kbd_register_key(&sys->kbd, 0x08, 5, 5, 0);   // Delete
   kbd_register_key(&sys->kbd, 0x0D, 5, 7, 0);   // Return
+  kbd_register_key(&sys->kbd, 0x1B, 5, 1, 0);   // Esc (column 5, line 1)
   kbd_register_key(&sys->kbd, ORIC_KEY_CTRL, 4, 2, 0);  // Ctrl
   kbd_register_key(&sys->kbd, ORIC_KEY_SHIFT, 4, 4, 0);  // Shift
 
