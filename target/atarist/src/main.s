@@ -26,11 +26,17 @@
 ROM4_ADDR			equ $FA0000
 CENTERED_XPOS		equ 16 ; Centered X position for Oric low res. 16 bytes (32 pixels) margin on left side
 FRAMEBUFFER_A_ADDR	equ (ROM4_ADDR + $1000)
+FRAMEBUFFER_B_ADDR	equ (ROM4_ADDR + $8000) ; Upper half of the window, freed from the Oric ROM
 AYBUFFER_ADDR		equ (FRAMEBUFFER_A_ADDR + (ORIC_LINES*ORIC_WORDS_PER_LINE*2*3)) ; AY sound buffer after the framebuffer
 AYBUFFER_SIZE		equ 512 ; Size of the AY sound buffer in bytes
 COPIED_CODE_OFFSET	equ $00010000 ; The offset should be below the screen memory
 COPIED_CODE_SIZE	equ $00001000
-PRE_RESET_WAIT		equ $0000FFFF ; Wait this many cycles before resetting the computer
+; Delay between seeing REMOTE_RESET and jumping through the reset vector. The
+; RP reboots into Booster right after writing the command, and TOS must not scan
+; the cartridge before Booster is back on the bus. $FFFF (~65 ms) is shorter
+; than an RP reboot; $FFFFF (~1 s) is what Booster itself uses in the other
+; direction, so match it.
+PRE_RESET_WAIT		equ $000FFFFF ; Wait this many cycles before resetting the computer
 SCREEN_A_BASE_ADDR  equ $60000 ; The screen memory address for the framebuffer
 SCREEN_B_BASE_ADDR  equ $70000 ; The screen memory address for the framebuffer
 ORIC_LINES		 	equ 224
@@ -42,15 +48,28 @@ LOW_BORDER_OVERSCAN_START       EQU 190
 _conterm			equ $484		; Conterm device number
 ACIA_BASE 	   		equ $fffffc00   ; Base address of the ACIA
 
-ROMCMD_START_ADDR:        equ (ROM4_ADDR + $F000)         ; The start address of the ROM commands
-CMD_KEYPRESS		   	  equ ($0BCD) 					  ; Key press
-CMD_KEYRELEASE		      equ ($0CBA) 					  ; Key release
+; m68k -> RP signalling goes through ROM3 ($FBxxxx). The RP samples every
+; ROM3 read into a DMA ring, so a read is a message and back-to-back reads
+; are safe. Values must match EMUL_ROM3_* in rp/src/include/emul.h.
+ROM3_ADDR		      	  equ $FB0000
+KEY_WINDOW_ADDR		      equ (ROM3_ADDR + $8200)		  ; + IKBD byte: bit 7 = release, low 7 bits = scancode
+BLITDONE_ADDR		      equ (ROM3_ADDR + $8400)		  ; Blit finished, RP may reuse the other buffer
+ROMCMD_START_ADDR:        equ (ROM4_ADDR + $F000)         ; Legacy: only the unused check_keys macro refers to it
+CMD_KEYPRESS		   	  equ ($0BCD) 					  ; Legacy (check_keys)
+CMD_KEYRELEASE		      equ ($0CBA) 					  ; Legacy (check_keys)
 CMD_BOOSTER		      	  equ ($0DEF) 					  ; Booster command
 
-LISTENER_ADDR		      equ (ROM4_ADDR + $5F8)		  ; The address of the listener
+LISTENER_ADDR		      equ (ROM4_ADDR + $5F8)		  ; RP->m68k command longword, polled once per VBL (past the code, inside the copied $1000)
+BOOTSTATUS_ADDR		      equ (ROM4_ADDR + $5FC)		  ; RP->m68k word, read once at startup: 0 = go, 1 = no microSD card
+BOOT_NO_SDCARD		      equ $1						  ; The RP could not mount a card, so there is no ROM to run
 REMOTE_RESET		      equ $1					      ; The device ask to reset the
 
 AYBUFF_POS		          equ $8                          ; Offset of the AY sound buffer position
+
+; Frame counter published by the RP once per completed frame. A word, free to
+; wrap: we only ever test it for inequality against our own saved copy. Sits in
+; the last longword of the copied code block, just below the framebuffer.
+FRAMECOUNT_ADDR	          equ (ROM4_ADDR + COPIED_CODE_SIZE - 4)
 
 _dskbufp                  equ $4c6                        ; Address of the disk buffer pointer    
 
@@ -156,6 +175,14 @@ pre_auto:
 	tst.w d0
 	bne lowres_only
 
+; The RP has already tried to mount the microSD card by now. Without one there
+; is no Oric ROM to run, so take the same exit as the resolution check: say
+; why, and hand back to GEM.
+.check_sdcard:
+	move.w BOOTSTATUS_ADDR, d0
+	cmp.w #BOOT_NO_SDCARD, d0
+	beq no_sdcard
+
 start_oric:
 ; Move the code below the screen memory
 	lea (SCREEN_A_BASE_ADDR-COPIED_CODE_OFFSET), a2
@@ -207,7 +234,12 @@ start_rom_code:
 	move.l	d0,$134.w			;Install our own Timer A (dummy)
 	move.l	d0,$114.w			;Install our own Timer C (dummy)
 	move.l	d0,$110.w			;Install our own Timer D (dummy)
-	move.l	d0,$118.w			;Install our own ACIA (dummy)
+	; The keyboard ACIA interrupts through MFP GPIP4 ($118). Reading bytes as
+	; they arrive is the only way to never miss one: the 6850 holds a single
+	; byte and the IKBD sends a burst at one byte per 1.28 ms, while Timer-B
+	; (which used to poll it) counts display-enable pulses and so cannot fire
+	; at all during the vertical blank and top border -- ~4 ms every frame.
+	move.l #(SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.acia_routine - ROM4_ADDR)),$118.w
 
 	; VBL now is a simple flag set
 	move.l #(SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.vblank_routine - ROM4_ADDR)), d0
@@ -223,6 +255,14 @@ start_rom_code:
 	move.l #(SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.timerb_routine - ROM4_ADDR)),$120.w ; Timer B interrupt vector
 	bset #0,$fffffa07        ; Interrupt Enable for Timer B (1=Enable, 0=Disable)
 	bset #0,$fffffa13        ; Interrupt Mask for Timer B (1=Unmask, 0=Mask)
+
+	; Keyboard ACIA: receive interrupt on (TOS's own setting, 8N1 /64), and
+	; the MIDI ACIA's receive interrupt off -- both share the GPIP4 line and
+	; nothing services MIDI here.
+	move.b #$96,$fffffc00.w
+	move.b #$15,$fffffc04.w
+	bset #6,$fffffa09.w      ; Interrupt Enable B: GPIP4 (ACIA)
+	bset #6,$fffffa15.w      ; Interrupt Mask B: GPIP4 (ACIA)
 	move.b	#TIMERB_COUNT_SCAN_LINES,$fffffa21.w   		; Timer B data (number of scanlines to next interrupt)
 ;	bclr #3,$fffffa17.w        ; Set Automatic End-Interrupt
 	move.b	#TIMERB_EVENT_COUNT,$fffffa1b.w			    ; Timer B control (event mode (HBL))
@@ -233,7 +273,7 @@ start_rom_code:
 
 	lea (SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.vblank_flag - ROM4_ADDR)), a6
 	clr.w (a6)			; Clear VBL flag
-	clr.l 2(a6)			; Clear last refreshed framebuffer value
+	clr.l 2(a6)			; Clear last frame counter (a6+2) and page flag (a6+4)
 	clr.w 6(a6)			; Clear overscan flag
 	clr.w AYBUFF_POS(a6); Clear AY sound buffer position
 
@@ -269,15 +309,33 @@ start_rom_code:
 	bra.s .continue_ay_sound
 
 .no_ay_sound:
-	move.l (ROM4_ADDR + COPIED_CODE_SIZE - 4), d0
-	cmp.l 2(a6), d0
- 	beq.s .loop_low_st ; If no need to refresh, wait for next VBL
+	; Once per VBL: has the RP asked us to reset the ST? It does this before
+	; rebooting itself into Booster, so the machine cold-boots into Booster's
+	; cartridge rather than sitting here with our palette and no frames.
+	; Inline rather than the check_commands macro: that one uses d6, which in
+	; this loop is the 160-byte line stride the blit relies on. d0 is free
+	; here -- the frame-counter read below overwrites it anyway.
+	move.l (LISTENER_ADDR), d0
+	cmp.l #REMOTE_RESET, d0
+	beq .reset
 
+	move.w FRAMECOUNT_ADDR, d0	; Frame counter published by the RP
+	cmp.w 2(a6), d0
+ 	beq.s .loop_low_st ; Counter unchanged: no new frame, wait for next VBL
+
+	; Bit 0 of the counter names the buffer the RP just finished writing.
 	lea FRAMEBUFFER_A_ADDR, a0
+	btst #0, d0
+	beq.s .src_chosen
+	lea FRAMEBUFFER_B_ADDR, a0
+.src_chosen:
 	move.w #ORIC_LINES-1, d7		; Number of lines to copy
 
-	move.l d0, 2(a6)	; Update the last refreshed framebuffer value
-	tst.l d0 		; Check which framebuffer is active
+	move.w d0, 2(a6)	; Remember the counter we are about to blit
+	; The destination page is ours to choose: alternate every blit so we never
+	; write the page currently being displayed. Deriving it from the RP value
+	; used to drop a frame whenever the RP produced two frames in one ST frame.
+	tst.w 4(a6)
 	bne .fb_b
 .fb_a:
 	lea (SCREEN_A_BASE_ADDR + CENTERED_XPOS), a1
@@ -315,8 +373,10 @@ start_rom_code:
 
 	add.l d6, a1	; Next line
 	dbf d7, .copy_planes_a
+	move.w #1, 4(a6)	; Next blit targets page B
 	move.b  #(SCREEN_A_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
-	move.b  #((SCREEN_A_BASE_ADDR >> 8) & 8), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	move.b  #((SCREEN_A_BASE_ADDR >> 8) & $ff), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	tst.b BLITDONE_ADDR	; Tell the RP the blit is done (ROM3 read)
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 
 .fb_b:
@@ -356,8 +416,10 @@ start_rom_code:
 	add.l d6, a1	; Next line
 	dbf d7, .copy_planes_b
 
+	clr.w 4(a6)			; Next blit targets page A
 	move.b  #(SCREEN_B_BASE_ADDR >> 16), VIDEO_BASE_ADDR_HIGH.w           ; put in high screen address byte
-	move.b  #((SCREEN_B_BASE_ADDR >> 8) & 8), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	move.b  #((SCREEN_B_BASE_ADDR >> 8) & $ff), VIDEO_BASE_ADDR_MID.w       ; put in mid screen address byte
+	tst.b BLITDONE_ADDR	; Tell the RP the blit is done (ROM3 read)
 
 	bra .loop_low_st	; Continue displaying framebuffers in Atari ST mode
 
@@ -366,31 +428,27 @@ start_rom_code:
 	beq.s .start_overscan
 
 .no_overscan:
-	btst #0, ACIA_BASE.w
-	bne.s .timerb_key
-	bclr    #0, $fffffa0f            ; tell ST interrupt is done
-	rte
-
-.timerb_key:
-	movem.l d0/a0,-(sp)
-	move.l #(ROMCMD_START_ADDR), a0 ; Start address of the ROM3
-	move.b (ACIA_BASE + 2).w, d0		; Read the ACIA status register
-	and.w #$FF, d0
-	btst #7, d0
-	bne.s .timerb_break_code_key
-
-	tst.b (ROMCMD_START_ADDR + CMD_KEYPRESS)  ; Command
-	tst.b (a0, d0.w)             ; Key press
-	movem.l (sp)+, d0/a0
-	bclr    #0, $fffffa0f            ; tell ST interrupt is done
-	rte
-
-.timerb_break_code_key:
-	tst.b (ROMCMD_START_ADDR + CMD_KEYRELEASE)  ; Command
-	tst.b (a0, d0.w)             ; Key released
-	movem.l (sp)+, d0/a0
 	bclr    #0, $fffffa0f            ; tell ST interrupt is done
 .dummy:
+	rte
+
+; Keyboard ACIA receive interrupt (MFP GPIP4). One cart read per IKBD byte:
+; the byte itself is the address offset and bit 7 already says press or
+; release, so there is no command word to pair with. Drains every byte the
+; ACIA holds before ending the interrupt, since the line is level-sensitive.
+.acia_routine:
+	movem.l d0/a0,-(sp)
+	lea KEY_WINDOW_ADDR, a0
+.acia_next:
+	btst #0, ACIA_BASE.w         ; RDRF: a byte is waiting
+	beq.s .acia_done
+	moveq #0, d0
+	move.b (ACIA_BASE + 2).w, d0 ; Read the IKBD byte (clears RDRF)
+	tst.b (a0, d0.w)             ; Emit it
+	bra.s .acia_next
+.acia_done:
+	movem.l (sp)+, d0/a0
+	bclr    #6, $fffffa11.w      ; ISRB: ACIA interrupt serviced
 	rte
 
 .start_overscan:
@@ -398,6 +456,15 @@ start_rom_code:
 	move.l #(SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.timerb_overscan - ROM4_ADDR)),$120.w ; Timer B interrupt vector
 	move.b	#(TIMERB_COUNT_SCAN_LINES - 1),$fffffa21.w  ; Timer B data (number of scanlines to next interrupt)
 	move.b	#TIMERB_EVENT_COUNT,$fffffa1b.w			    ; Timer B control (event mode (HBL))	
+	; Hold off the keyboard for the ~9 scanlines before the border trick.
+	; Every MFP source is level 6, so the 68000 masks Timer B for as long as
+	; the ACIA handler runs -- and .timerb_overscan has to hit its cycle
+	; exactly or the shifter loses lock and the frame comes out black. We are
+	; inside a Timer B interrupt here, so no ACIA handler can be running;
+	; masking now guarantees none starts before the trick. Nothing is lost:
+	; the 6850 holds a byte, the IKBD sends one per 1.28 ms, and a masked
+	; interrupt stays pending in IPRB and fires the moment it is unmasked.
+	bclr #6,$fffffa15.w      ; Interrupt Mask B: GPIP4 (ACIA) off
 	bra.s .no_overscan
 
 .timerb_overscan:
@@ -411,6 +478,12 @@ start_rom_code:
 	endr
 	move.b	#2,$ffff820a.w	; LineCycles=500-508
 
+	; The trick is done, so let the keyboard back in.
+	bset #6,$fffffa15.w      ; Interrupt Mask B: GPIP4 (ACIA) on
+	; Timer B has nothing left to do this frame -- the VBL handler re-arms
+	; it. It used to be left running here to keep polling the keyboard, which
+	; the ACIA interrupt now does; leaving it on only added interrupts
+	; through the opened border.
 	clr.b $fffffa1b.w		   ; Stop Timer B
 	bclr    #0, $fffffa0f      ; tell ST interrupt is done
 	rte
@@ -426,13 +499,22 @@ start_rom_code:
 	move.w #LOW_BORDER_OVERSCAN_START, (SCREEN_A_BASE_ADDR - COPIED_CODE_OFFSET + (.overscan_flag - ROM4_ADDR))
 	rte
 .vblank_flag:
-	dc.w 0
-.refresh_fb_flag:
-	dc.l 0
+	dc.w 0						; a6+0
+.last_framecount:
+	dc.w 0						; a6+2  last RP frame counter we blitted
+.page_flag:
+	dc.w 0						; a6+4  0 = next blit targets page A, else page B
 .overscan_flag:
-	dc.w 0
+	dc.w 0						; a6+6
+.aybuff_pos:					; AYBUFF_POS equ $8 -> a6+8. Must stay immediately
+	dc.w 0						; after .overscan_flag to keep that offset.
 
 
+; Cold reset. Clearing memvalid/memval2/memval3 makes TOS treat this as a
+; power-on: it re-sizes RAM and reinitialises the shifter (palette, base,
+; resolution), the MFP, the IKBD and every vector we hijacked. Nothing has to
+; be restored by hand first. Runs from the copied block in ST RAM, and touches
+; no cartridge address while it waits, so the RP can be gone by then.
 .reset:
     move.l #PRE_RESET_WAIT, d6
 .wait_me:
@@ -453,6 +535,17 @@ lowres_only:
 
 lowres_only_txt: 
 	dc.b "Oric Emulator only supports low res",$d,$a
+	dc.b 0
+
+	even
+
+no_sdcard:
+	print no_sdcard_txt
+    rts
+
+no_sdcard_txt:
+	dc.b "Oric Emulator: no microSD card.",$d,$a
+	dc.b "Insert one and reset.",$d,$a
 	dc.b 0
 
 	even

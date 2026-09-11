@@ -83,6 +83,7 @@ add_executable(${PROJECT_NAME}
 )
 
 pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/romemul.pio)
+pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/commemul.pio)
 
 target_sources(${PROJECT_NAME} PRIVATE
         aconfig.c
@@ -92,6 +93,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         kbdmap.c
         reload/systems/oric/src/oric.c
         romemul.c
+        commemul.c
         sdcard.c
         settings/settings.c)
 

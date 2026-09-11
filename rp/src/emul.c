@@ -7,6 +7,7 @@
  */
 
 #include "emul.h"
+#include "commemul.h"
 
 #include "reload/systems/oric/src/oric.h"
 
@@ -17,69 +18,43 @@
 // By default, we reset the device.
 static bool resetDeviceAtBoot = true;
 
-// Ring buffer for DMA LSB lookup values.
-#define EMUL_ADDRLOG_CAPACITY 16
-volatile uint16_t __not_in_flash() addrlog_buf[EMUL_ADDRLOG_CAPACITY];
-volatile size_t addrlog_head = 0;
-volatile size_t addrlog_tail = 0;
-volatile size_t addrlog_count = 0;
+// Blit-finished signal from the m68k, counted by the ROM3 dispatch in
+// oric.c; Core 1 paces on it.
+volatile uint32_t __not_in_flash() emul_blitDoneCount = 0;
 
-void __not_in_flash_func(emul_addrlog_clear)(void) {
-  addrlog_head = 0;
-  addrlog_tail = 0;
-  addrlog_count = 0;
-}
-
-bool __not_in_flash_func(emul_addrlog_pop)(uint16_t *value) {
-  if (addrlog_count == 0) {
-    return false;
-  }
-  if (value) {
-    *value = addrlog_buf[addrlog_tail];
-  }
-  addrlog_tail = (addrlog_tail + 1) % EMUL_ADDRLOG_CAPACITY;
-  addrlog_count--;
-  return true;
-}
-
-bool __not_in_flash_func(emul_addrlog_peek)(uint16_t *value) {
-  if (addrlog_count == 0 || !value) {
-    return false;
-  }
-  *value = addrlog_buf[addrlog_tail];
-  return true;
-}
-
-size_t __not_in_flash_func(emul_addrlog_count)(void) { return addrlog_count; }
-
-static void __not_in_flash_func(emul_dma_irqHandlerLookup)(void) {
-  uint32_t pending = dma_hw->ints1;
-  dma_hw->ints1 = pending;
-
-  while (pending) {
-    int chan = __builtin_ctz(pending);
-    pending &= ~(1U << chan);
-
-    // Read the address to process
-    uint16_t addrLsb = dma_hw->ch[2].al3_read_addr_trig;
-
-    if (addrLsb >= 0xF000) {
-      if (addrlog_count < EMUL_ADDRLOG_CAPACITY) {
-        addrlog_buf[addrlog_head] = addrLsb;
-        addrlog_head = (addrlog_head + 1) % EMUL_ADDRLOG_CAPACITY;
-        addrlog_count++;
-        // DPRINTF("DMA_LSB LOOKUP: $%x\n", addrLsb);
-      }
-    }
-  }
-}
+// How often to look for a card once the Atari has been sent back to GEM.
+#define SDCARD_RETRY_MS 500
 
 void emul_start() {
   // Copy the target firmware to RAM so the remote machine can execute it.
-  COPY_FIRMWARE_TO_RAM((uint16_t *)target_firmware, target_firmware_length * 4);
+  // The macro's length is in bytes; target_firmware_length counts uint16_t
+  // entries. Asking for length * 4 copied twice the image -- 1360 bytes of
+  // cart code plus 1360 bytes of whatever follows it in flash, landing on
+  // everything from offset 1360 up, the listener longword at $05F8 included.
+  COPY_FIRMWARE_TO_RAM((uint16_t *)target_firmware,
+                       target_firmware_length * sizeof(target_firmware[0]));
 
-  // Initialize the ROM emulator PIO path without command handlers.
-  init_romemul(NULL, emul_dma_irqHandlerLookup, false);
+  // Tell the cartridge code it may run. Written before romemul starts
+  // serving the bus, so the Atari can never read an uninitialised value
+  // here; the SD check below sets it to NO_SDCARD if there is nothing to
+  // load, long before the Atari gets as far as reading it.
+  volatile uint16_t *bootStatus =
+      (volatile uint16_t *)((uint8_t *)&__rom_in_ram_start__ +
+                            ATARI_ST_BOOTSTATUS_OFFSET);
+  *bootStatus = ATARI_ST_BOOT_OK;
+
+  // ROM4 serves the cartridge image and framebuffers; nothing on the RP
+  // needs to see those reads, so no DMA interrupt is installed at all.
+  init_romemul(NULL, NULL, false);
+
+  // ROM3 is the m68k -> RP signalling window: every read of $FBxxxx is
+  // sampled by its own PIO state machine straight into a 32 KB DMA ring,
+  // which Core 0 drains. No interrupt, so two back-to-back reads can never
+  // overwrite each other -- the way the old per-read DMA IRQ lost key
+  // events. Ported from md-framebuffer-template.
+  if (commemul_init() < 0) {
+    panic("commemul_init failed");
+  }
 
   // Initialize the SD card filesystem for the app folder.
   FATFS fsys;
@@ -94,13 +69,19 @@ void emul_start() {
   }
   int sdcardErr = sdcard_initFilesystem(&fsys, folderName);
   if (sdcardErr != SDCARD_INIT_OK) {
+    // No card means no ROM, so there is nothing to emulate. Tell the
+    // cartridge code, which says so and hands back to GEM. Then keep
+    // looking, so that inserting a card and resetting the Atari works
+    // without power-cycling the board as well.
     DPRINTF("Error initializing the SD card: %i\n", sdcardErr);
-    while (1) {
-      sleep_ms(SLEEP_LOOP_MS);
+    *bootStatus = ATARI_ST_BOOT_NO_SDCARD;
+    while (sdcardErr != SDCARD_INIT_OK) {
+      sleep_ms(SDCARD_RETRY_MS);
+      sdcardErr = sdcard_initFilesystem(&fsys, folderName);
     }
-  } else {
-    DPRINTF("SD card found & initialized\n");
+    *bootStatus = ATARI_ST_BOOT_OK;
   }
+  DPRINTF("SD card found & initialized\n");
 
   // Start the Oric emulation loop.
   DPRINTF("Start the app loop here\n");

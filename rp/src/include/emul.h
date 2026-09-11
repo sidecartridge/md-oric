@@ -32,8 +32,6 @@ enum {
 
 #define APP_MODE_SETUP_STR "255"  // App mode setup string
 
-#define CMD_KEYPRESS 0x0BCD    // Key press
-#define CMD_KEYRELEASE 0x0CBA  // Key release
 #define CMD_BOOSTER 0x0DEF     // Booster command
 
 /**
@@ -46,10 +44,15 @@ enum {
  */
 void emul_start();
 
+// Bumped each time the m68k signals "blit finished" -- one ROM3 read, picked
+// up when Core 0 drains the sample ring. Read by Core 1 to pace rendering.
+extern volatile uint32_t emul_blitDoneCount;
+
 // Ring buffer for DMA LSB lookup values.
-void __not_in_flash_func(emul_addrlog_clear)(void);
-bool __not_in_flash_func(emul_addrlog_pop)(uint16_t *value);
-bool __not_in_flash_func(emul_addrlog_peek)(uint16_t *value);
-size_t __not_in_flash_func(emul_addrlog_count)(void);
+// ROM3 window layout ($FBxxxx, low 16 bits of the sampled address). The
+// m68k side keeps the same values as equs in main.s.
+#define EMUL_ROM3_KEY_WINDOW 0x8200u   // + IKBD byte (bit 7 = release)
+#define EMUL_ROM3_KEY_MASK 0xFF00u
+#define EMUL_ROM3_BLITDONE 0x8400u     // one read after each blit
 
 #endif  // EMUL_H

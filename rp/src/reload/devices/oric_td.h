@@ -49,13 +49,16 @@ void oric_td_reset(oric_td_t* sys);
 void oric_td_tick_sdcard(oric_td_t* sys);
 
 // Insert a new tape file from SD card
-bool oric_td_insert_tape_sdcard(oric_td_t* sys, int index);
-
-// Convert TAP image into WAVE image stored on SD card
-bool oric_convert_tap_to_wave(const char* tap_path, const char* wave_path);
+// SAFEGUARD: takes a filename, not an F-key index -- the menu chooses the
+// file now. The .tap is played directly, generated as it goes.
+bool oric_td_insert_tape_sdcard(oric_td_t* sys, const char* filename);
 
 // Remove the tape file from SD card
 void oric_td_remove_tape_sdcard(oric_td_t* sys);
+
+// SAFEGUARD: how far through the tape we are, for the on-screen loading bar.
+// Returns false when nothing is playing.
+bool oric_td_progress(const oric_td_t* sys, uint32_t* pos, uint32_t* size);
 
 // Return true if the tape drive motor is on
 bool oric_td_is_motor_on(oric_td_t* sys);
@@ -80,21 +83,59 @@ void oric_td_snapshot_onload(oric_td_t* snapshot, oric_td_t* sys);
 #endif
 
 typedef struct {
-  FIL* out;
   uint32_t wave_size;
   uint8_t current_level;
   uint8_t shifter;
   uint8_t shift_count;
 } oric_tap_stream_t;
 
-static bool oric_tap_write_byte(oric_tap_stream_t* st, uint8_t value) {
-  UINT bytes_written = 0;
-  FRESULT res = f_write(st->out, &value, 1, &bytes_written);
-  if (res != FR_OK || bytes_written != 1) {
+// SAFEGUARD START: direct .tap playback.
+//
+// The "wave" file this device plays is not a real WAV -- it is a packed
+// bitstream, one bit per tape signal level, with a 4-byte size header. The
+// converter below builds it by pushing bytes at a file.
+//
+// Direct playback keeps that encoder byte-for-byte (it owns the bit timings
+// that make real programs load) and only changes where the bytes go: into a
+// small ring that the tape tick drains, refilled on demand. The whole stream
+// is far too big for RAM -- roughly 4 bytes of bitstream per TAP byte -- so it
+// has to be generated as it is consumed, which is why the TAP reader becomes
+// the resumable state machine further down.
+#define ORIC_TAP_RING_SIZE 256u
+static uint8_t oric_tap_ring[ORIC_TAP_RING_SIZE];
+static uint16_t oric_tap_ring_head;  // producer
+static uint16_t oric_tap_ring_tail;  // consumer
+
+static inline uint16_t oric_tap_ring_used(void) {
+  return (uint16_t)((oric_tap_ring_head - oric_tap_ring_tail) &
+                    (ORIC_TAP_RING_SIZE - 1u));
+}
+static inline uint16_t oric_tap_ring_free(void) {
+  return (uint16_t)(ORIC_TAP_RING_SIZE - 1u - oric_tap_ring_used());
+}
+static inline bool oric_tap_ring_push(uint8_t value) {
+  if (oric_tap_ring_free() == 0) {
     return false;
   }
-  st->wave_size++;
+  oric_tap_ring[oric_tap_ring_head] = value;
+  oric_tap_ring_head =
+      (uint16_t)((oric_tap_ring_head + 1u) & (ORIC_TAP_RING_SIZE - 1u));
   return true;
+}
+static inline bool oric_tap_ring_pop(uint8_t* value) {
+  if (oric_tap_ring_used() == 0) {
+    return false;
+  }
+  *value = oric_tap_ring[oric_tap_ring_tail];
+  oric_tap_ring_tail =
+      (uint16_t)((oric_tap_ring_tail + 1u) & (ORIC_TAP_RING_SIZE - 1u));
+  return true;
+}
+// SAFEGUARD END
+
+static bool oric_tap_write_byte(oric_tap_stream_t* st, uint8_t value) {
+  st->wave_size++;
+  return oric_tap_ring_push(value);
 }
 
 static bool oric_tap_flush_output(oric_tap_stream_t* st) {
@@ -221,206 +262,163 @@ static bool oric_tap_find_synchro(oric_tap_input_t* in_state) {
   return false;
 }
 
-static bool oric_tap_output_big_synchro(oric_tap_stream_t* st) {
-  for (int i = 0; i < 259; i++) {
-    if (!oric_tap_output_byte(st, 0x16)) {
-      return false;
-    }
-  }
-  return oric_tap_output_byte(st, 0x24);
+// SAFEGUARD START: resumable TAP -> bitstream generator.
+//
+// The same sequence the old file-based converter performed in straight-line
+// code, split
+// into phases so it can stop whenever the ring is full and pick up where it
+// left off. Emitting one element per step keeps the ring requirement tiny: the
+// largest single element is one encoded byte, about 26 half-periods.
+enum {
+  ORIC_TAPGEN_GAP = 0,
+  ORIC_TAPGEN_FIND_SYNC,
+  ORIC_TAPGEN_BIG_SYNC,
+  ORIC_TAPGEN_HEADER,
+  ORIC_TAPGEN_NAME,
+  ORIC_TAPGEN_GAP2,
+  ORIC_TAPGEN_DATA,
+  ORIC_TAPGEN_GAP3,
+  ORIC_TAPGEN_DONE
+};
+
+static oric_tap_input_t oric_tap_in;
+static oric_tap_stream_t oric_tap_st;
+static uint8_t oric_tap_phase;
+static uint32_t oric_tap_count;      // elements left in the current phase
+static uint32_t oric_tap_data_size;  // body length from the header
+static uint8_t oric_tap_header[9];
+static bool oric_tap_direct;  // true = generating from a .tap, no .wav involved
+
+static void oric_tapgen_init(FIL* in, uint32_t size) {
+  oric_tap_input_init(&oric_tap_in, in, size);
+  oric_tap_st.wave_size = 0;
+  oric_tap_st.current_level = 0;
+  oric_tap_st.shifter = 0;
+  oric_tap_st.shift_count = 0;
+  oric_tap_ring_head = 0;
+  oric_tap_ring_tail = 0;
+  oric_tap_phase = ORIC_TAPGEN_GAP;
+  oric_tap_count = 5;  // the leading gap the converter emits first
+  oric_tap_data_size = 0;
 }
 
-static bool oric_tap_output_file(oric_tap_input_t* in_state,
-                                 oric_tap_stream_t* st) {
-  uint8_t header[9];
-  uint32_t i = 0;
-
-  while (in_state->pos < in_state->size && i < sizeof(header)) {
-    if (!oric_tap_read_byte(in_state, &header[i])) {
-      return false;
-    }
-    if (!oric_tap_output_byte(st, header[i])) {
-      return false;
-    }
-    i++;
-  }
-  if (in_state->pos >= in_state->size) {
-    return false;
-  }
-
+// Emit one element. Returns false when the tape is finished.
+static bool oric_tapgen_step(void) {
   uint8_t value = 0;
-  while (in_state->pos < in_state->size) {
-    if (!oric_tap_read_byte(in_state, &value)) {
-      return false;
+  switch (oric_tap_phase) {
+    case ORIC_TAPGEN_GAP:
+      (void)oric_tap_output_half_period(&oric_tap_st, 1);
+      if (--oric_tap_count == 0) {
+        oric_tap_phase = ORIC_TAPGEN_FIND_SYNC;
+      }
+      return true;
+
+    case ORIC_TAPGEN_FIND_SYNC:
+      // Consumes input without emitting, so it cannot overrun the ring.
+      if (oric_tap_in.pos >= oric_tap_in.size ||
+          !oric_tap_find_synchro(&oric_tap_in)) {
+        oric_tap_phase = ORIC_TAPGEN_DONE;
+        (void)oric_tap_flush_output(&oric_tap_st);
+        return false;
+      }
+      oric_tap_phase = ORIC_TAPGEN_BIG_SYNC;
+      oric_tap_count = 259;
+      return true;
+
+    case ORIC_TAPGEN_BIG_SYNC:
+      if (oric_tap_count > 0) {
+        (void)oric_tap_output_byte(&oric_tap_st, 0x16);
+        oric_tap_count--;
+      } else {
+        (void)oric_tap_output_byte(&oric_tap_st, 0x24);
+        oric_tap_phase = ORIC_TAPGEN_HEADER;
+        oric_tap_count = 0;
+      }
+      return true;
+
+    case ORIC_TAPGEN_HEADER:
+      if (!oric_tap_read_byte(&oric_tap_in, &value)) {
+        oric_tap_phase = ORIC_TAPGEN_DONE;
+        (void)oric_tap_flush_output(&oric_tap_st);
+        return false;
+      }
+      oric_tap_header[oric_tap_count] = value;
+      (void)oric_tap_output_byte(&oric_tap_st, value);
+      if (++oric_tap_count == sizeof(oric_tap_header)) {
+        oric_tap_phase = ORIC_TAPGEN_NAME;
+      }
+      return true;
+
+    case ORIC_TAPGEN_NAME:
+      if (!oric_tap_read_byte(&oric_tap_in, &value)) {
+        oric_tap_phase = ORIC_TAPGEN_DONE;
+        (void)oric_tap_flush_output(&oric_tap_st);
+        return false;
+      }
+      (void)oric_tap_output_byte(&oric_tap_st, value);
+      if (value == 0) {
+        oric_tap_phase = ORIC_TAPGEN_GAP2;
+        oric_tap_count = 6;
+      }
+      return true;
+
+    case ORIC_TAPGEN_GAP2: {
+      (void)oric_tap_output_half_period(&oric_tap_st, 1);
+      if (--oric_tap_count == 0) {
+        const uint32_t start =
+            (uint32_t)oric_tap_header[6] * 256u + oric_tap_header[7];
+        const uint32_t end =
+            (uint32_t)oric_tap_header[4] * 256u + oric_tap_header[5];
+        if (end < start) {
+          oric_tap_phase = ORIC_TAPGEN_DONE;
+          (void)oric_tap_flush_output(&oric_tap_st);
+          return false;
+        }
+        oric_tap_data_size = end - start + 1u;
+        oric_tap_phase = ORIC_TAPGEN_DATA;
+        oric_tap_count = 0;
+      }
+      return true;
     }
-    if (!oric_tap_output_byte(st, value)) {
+
+    case ORIC_TAPGEN_DATA:
+      if (oric_tap_count >= oric_tap_data_size) {
+        oric_tap_phase = ORIC_TAPGEN_GAP3;
+        oric_tap_count = 2;
+        return true;
+      }
+      if (!oric_tap_read_byte(&oric_tap_in, &value)) {
+        oric_tap_phase = ORIC_TAPGEN_DONE;
+        (void)oric_tap_flush_output(&oric_tap_st);
+        return false;
+      }
+      (void)oric_tap_output_byte(&oric_tap_st, value);
+      oric_tap_count++;
+      return true;
+
+    case ORIC_TAPGEN_GAP3:
+      (void)oric_tap_output_half_period(&oric_tap_st, 1);
+      if (--oric_tap_count == 0) {
+        // Another file may follow on the same tape.
+        oric_tap_phase = ORIC_TAPGEN_FIND_SYNC;
+      }
+      return true;
+
+    default:
       return false;
-    }
-    if (value == 0) {
+  }
+}
+
+// Top up the ring. One encoded byte is at most ~26 half-periods = ~4 bytes,
+// so 16 bytes of headroom is ample for a single step.
+static void oric_tapgen_fill(void) {
+  while (oric_tap_phase != ORIC_TAPGEN_DONE && oric_tap_ring_free() >= 16u) {
+    if (!oric_tapgen_step()) {
       break;
     }
   }
-  if (in_state->pos >= in_state->size && value != 0) {
-    return false;
-  }
-
-  for (int j = 0; j < 6; j++) {
-    if (!oric_tap_output_half_period(st, 1)) {
-      return false;
-    }
-  }
-
-  uint32_t start = (uint32_t)header[6] * 256u + header[7];
-  uint32_t end = (uint32_t)header[4] * 256u + header[5];
-  if (end < start) {
-    return false;
-  }
-  uint32_t data_size = end - start + 1;
-  i = 0;
-  while (in_state->pos < in_state->size && i < data_size) {
-    if (!oric_tap_read_byte(in_state, &value)) {
-      return false;
-    }
-    if (!oric_tap_output_byte(st, value)) {
-      return false;
-    }
-    i++;
-  }
-  if (in_state->pos == in_state->size && i < data_size) {
-    return false;
-  }
-
-  for (int j = 0; j < 2; j++) {
-    if (!oric_tap_output_half_period(st, 1)) {
-      return false;
-    }
-  }
-
-  return true;
 }
-
-bool oric_convert_tap_to_wave(const char* tap_path, const char* wave_path) {
-  FIL in;
-  FIL out;
-  FRESULT res;
-  UINT bytes_written = 0;
-  uint64_t start_time = GET_CURRENT_TIME();
-
-  if (!tap_path || !wave_path) {
-    DPRINTF("Oric TD: convert_tap_to_wave invalid path\n");
-    return false;
-  }
-
-  res = f_open(&in, tap_path, FA_READ);
-  if (res != FR_OK) {
-    DPRINTF("Oric TD: convert_tap_to_wave open tap failed (%d): %s\n",
-            (int)res,
-            tap_path);
-    return false;
-  }
-
-  res = f_open(&out, wave_path, FA_CREATE_ALWAYS | FA_WRITE);
-  if (res != FR_OK) {
-    DPRINTF("Oric TD: convert_tap_to_wave open wav failed (%d): %s\n",
-            (int)res,
-            wave_path);
-    f_close(&in);
-    return false;
-  }
-
-  uint8_t header[4] = {0, 0, 0, 0};
-  res = f_write(&out, header, sizeof(header), &bytes_written);
-  if (res != FR_OK || bytes_written != sizeof(header)) {
-    DPRINTF("Oric TD: convert_tap_to_wave header write failed (%d)\n",
-            (int)res);
-    f_close(&out);
-    f_close(&in);
-    return false;
-  }
-
-  oric_tap_stream_t st = {
-      .out = &out,
-      .wave_size = 0,
-      .current_level = 0,
-      .shifter = 0,
-      .shift_count = 0,
-  };
-
-  for (int i = 0; i < 5; i++) {
-    if (!oric_tap_output_half_period(&st, 1)) {
-      DPRINTF("Oric TD: convert_tap_to_wave gap write failed\n");
-      f_close(&out);
-      f_close(&in);
-      return false;
-    }
-  }
-
-  uint32_t size = f_size(&in);
-  oric_tap_input_t in_state;
-  oric_tap_input_init(&in_state, &in, size);
-  uint32_t last_log_pos = 0;
-  DPRINTF("Oric TD: convert_tap_to_wave start size=%lu\n",
-          (unsigned long)size);
-  while (in_state.pos < size) {
-    if (oric_tap_find_synchro(&in_state)) {
-      if (!oric_tap_output_big_synchro(&st)) {
-        DPRINTF("Oric TD: convert_tap_to_wave big synchro failed\n");
-        f_close(&out);
-        f_close(&in);
-        return false;
-      }
-      if (!oric_tap_output_file(&in_state, &st)) {
-        DPRINTF("Oric TD: convert_tap_to_wave file output failed\n");
-        f_close(&out);
-        f_close(&in);
-        return false;
-      }
-      if (in_state.pos - last_log_pos >= 4096) {
-        DPRINTF("Oric TD: convert_tap_to_wave progress %lu/%lu\n",
-                (unsigned long)in_state.pos,
-                (unsigned long)size);
-        last_log_pos = in_state.pos;
-      }
-    } else {
-      break;
-    }
-  }
-
-  if (!oric_tap_flush_output(&st)) {
-    DPRINTF("Oric TD: convert_tap_to_wave flush failed\n");
-    f_close(&out);
-    f_close(&in);
-    return false;
-  }
-
-  if (f_lseek(&out, 0) != FR_OK) {
-    DPRINTF("Oric TD: convert_tap_to_wave seek failed\n");
-    f_close(&out);
-    f_close(&in);
-    return false;
-  }
-
-  header[0] = (uint8_t)(st.wave_size & 0xFFu);
-  header[1] = (uint8_t)((st.wave_size >> 8) & 0xFFu);
-  header[2] = (uint8_t)((st.wave_size >> 16) & 0xFFu);
-  header[3] = (uint8_t)((st.wave_size >> 24) & 0xFFu);
-
-  res = f_write(&out, header, sizeof(header), &bytes_written);
-  if (res != FR_OK || bytes_written != sizeof(header)) {
-    DPRINTF("Oric TD: convert_tap_to_wave size write failed (%d)\n",
-            (int)res);
-    f_close(&out);
-    f_close(&in);
-    return false;
-  }
-
-  f_close(&out);
-  f_close(&in);
-  DPRINTF("Oric TD: convert_tap_to_wave done (%lu bytes) in %lu ms\n",
-          (unsigned long)st.wave_size,
-          (unsigned long)GET_CURRENT_TIME_INTERVAL_MS(start_time));
-  return true;
-}
+// SAFEGUARD END
 
 void oric_td_init(oric_td_t* sys) {
   CHIPS_ASSERT(sys && !sys->valid);
@@ -440,8 +438,14 @@ void oric_td_reset(oric_td_t* sys) {
   sys->size = 0;
   sys->pos = 0;
   sys->bit_pos = 7;
-  sys->sd_file_open = false;
   sys->sd_have_byte = false;
+  // SAFEGUARD: a reset rewinds the tape, it does not eject it. This used to
+  // clear sd_file_open, so after any reset (HELP, RESET ORIC, a disk boot)
+  // the drive silently played nothing while the menu still named the tape.
+  if (sys->sd_file_open && oric_tap_direct) {
+    (void)f_lseek(&sys->sd_file, 0);
+    oric_tapgen_init(&sys->sd_file, (uint32_t)f_size(&sys->sd_file));
+  }
 }
 
 void oric_td_tick_sdcard(oric_td_t* sys) {
@@ -450,17 +454,29 @@ void oric_td_tick_sdcard(oric_td_t* sys) {
   if (!sys->sd_file_open) {
     return;
   }
-  if (!oric_td_is_motor_on(sys) || sys->size == 0 || sys->pos >= sys->size) {
+  if (!oric_td_is_motor_on(sys)) {
     return;
   }
 
   if (!sys->sd_have_byte) {
-    UINT bytes_read = 0;
-    FRESULT res = f_read(&sys->sd_file, &sys->sd_byte, 1, &bytes_read);
-    if (res != FR_OK || bytes_read != 1) {
-      sys->sd_have_byte = false;
-      sys->size = 0;
-      return;
+    if (oric_tap_direct) {
+      // Top up first: the generator only runs while the tape is moving, so it
+      // costs nothing when the motor is off.
+      oric_tapgen_fill();
+      if (!oric_tap_ring_pop(&sys->sd_byte)) {
+        return;  // generator finished and the ring has drained
+      }
+    } else {
+      if (sys->size == 0 || sys->pos >= sys->size) {
+        return;
+      }
+      UINT bytes_read = 0;
+      FRESULT res = f_read(&sys->sd_file, &sys->sd_byte, 1, &bytes_read);
+      if (res != FR_OK || bytes_read != 1) {
+        sys->sd_have_byte = false;
+        sys->size = 0;
+        return;
+      }
     }
     sys->sd_have_byte = true;
   }
@@ -475,7 +491,8 @@ void oric_td_tick_sdcard(oric_td_t* sys) {
   if (sys->bit_pos == 0) {
     sys->bit_pos = 7;
     sys->pos++;
-    if ((sys->pos % 1000u) == 0u && sys->pos != last_logged_pos) {
+    if (!oric_tap_direct && (sys->pos % 1000u) == 0u &&
+        sys->pos != last_logged_pos) {
       DPRINTF("Oric TD: read pos=%lu\n", (unsigned long)sys->pos);
       last_logged_pos = sys->pos;
     }
@@ -485,68 +502,88 @@ void oric_td_tick_sdcard(oric_td_t* sys) {
   }
 }
 
-bool oric_td_insert_tape_sdcard(oric_td_t* sys, int index) {
+bool oric_td_insert_tape_sdcard(oric_td_t* sys, const char* filename) {
   CHIPS_ASSERT(sys && sys->valid);
+  if (!filename || filename[0] == '\0') {
+    return false;
+  }
   oric_td_remove_tape_sdcard(sys);
   sys->bit_pos = 7;
 
   SettingsConfigEntry* folder =
       settings_find_entry(aconfig_getContext(), ACONFIG_PARAM_FOLDER);
   const char* folder_name = folder ? folder->value : "/oric";
-  char wav_path[256];
+
+  // Derive the .tap path from the chosen name. The .wav path is built only so
+  // a cache left by an older firmware can be deleted.
+  char base[256];
+  size_t blen = strlen(filename);
+  if (blen >= sizeof(base)) {
+    DPRINTF("Oric TD: tape name too long\n");
+    return false;
+  }
+  memcpy(base, filename, blen + 1);
+  char* dot = strrchr(base, '.');
+  if (dot) {
+    *dot = '\0';
+  }
+
   char tap_path[256];
-  int wav_len =
-      snprintf(wav_path, sizeof(wav_path), "%s/f%d.wav", folder_name, index + 1);
+  // Only used to clear the stale cache an older firmware may have left here.
+  char wav_path[256];
   int tap_len =
-      snprintf(tap_path, sizeof(tap_path), "%s/f%d.tap", folder_name, index + 1);
-  if (wav_len <= 0 || (size_t)wav_len >= sizeof(wav_path) || tap_len <= 0 ||
-      (size_t)tap_len >= sizeof(tap_path)) {
+      snprintf(tap_path, sizeof(tap_path), "%s/%s.tap", folder_name, base);
+  int wav_len =
+      snprintf(wav_path, sizeof(wav_path), "%s/%s.wav", folder_name, base);
+  if (tap_len <= 0 || (size_t)tap_len >= sizeof(tap_path) || wav_len <= 0 ||
+      (size_t)wav_len >= sizeof(wav_path)) {
     DPRINTF("Oric TD: invalid tape path length\n");
     return false;
   }
 
-  FRESULT res = f_open(&sys->sd_file, wav_path, FA_READ);
-  if (res != FR_OK) {
-    DPRINTF("Oric TD: wav open failed (%d): %s\n", (int)res, wav_path);
-    FILINFO info;
-    res = f_stat(tap_path, &info);
-    if (res != FR_OK) {
-      DPRINTF("Oric TD: tap missing (%d): %s\n", (int)res, tap_path);
-      return false;
+  // SAFEGUARD: prefer the .tap and generate its bitstream as it plays. No
+  // conversion pass, no delay on first load, and nothing written to the card.
+  oric_tap_direct = false;
+  FILINFO tap_info;
+  if (f_stat(tap_path, &tap_info) == FR_OK &&
+      f_open(&sys->sd_file, tap_path, FA_READ) == FR_OK) {
+    oric_tapgen_init(&sys->sd_file, (uint32_t)tap_info.fsize);
+    oric_tap_direct = true;
+    sys->size = 0;
+    sys->pos = 0;
+    sys->sd_file_open = true;
+    sys->sd_have_byte = false;
+    DPRINTF("Oric TD: playing %s directly (%lu bytes)\n", tap_path,
+            (unsigned long)tap_info.fsize);
+    // Nothing generates .wav files any more, so a matching one here can only
+    // be a cache written by an older firmware. Delete it: it is dead weight on
+    // the card and would otherwise clutter the tape list forever.
+    if (f_unlink(wav_path) == FR_OK) {
+      DPRINTF("Oric TD: removed stale cache %s\n", wav_path);
     }
-    DPRINTF("Oric TD: converting tap to wav: %s\n", tap_path);
-    if (!oric_convert_tap_to_wave(tap_path, wav_path)) {
-      DPRINTF("Oric TD: convert_tap_to_wave failed\n");
-      return false;
-    }
-    res = f_open(&sys->sd_file, wav_path, FA_READ);
-    if (res != FR_OK) {
-      DPRINTF("Oric TD: wav open after convert failed (%d): %s\n",
-              (int)res,
-              wav_path);
-      return false;
-    }
+    return true;
   }
 
-  uint8_t header[4];
-  UINT bytes_read = 0;
-  res = f_read(&sys->sd_file, header, sizeof(header), &bytes_read);
-  if (res != FR_OK || bytes_read != sizeof(header)) {
-    DPRINTF("Oric TD: wav header read failed (%d)\n", (int)res);
-    f_close(&sys->sd_file);
+  DPRINTF("Oric TD: no .tap for %s\n", base);
+  return false;
+}
+
+bool oric_td_progress(const oric_td_t* sys, uint32_t* pos, uint32_t* size) {
+  if (!sys->valid || !sys->sd_file_open || !oric_tap_direct) {
     return false;
   }
-
-  sys->size =
-      header[0] | (header[1] << 8) | (header[2] << 16) | (header[3] << 24);
-  sys->pos = 0;
-  sys->sd_file_open = true;
-  sys->sd_have_byte = false;
-  DPRINTF("Oric TD: tape loaded size=%lu\n", (unsigned long)sys->size);
+  if (oric_tap_in.size == 0) {
+    return false;
+  }
+  *pos = oric_tap_in.pos;
+  *size = oric_tap_in.size;
   return true;
 }
 
 void oric_td_remove_tape_sdcard(oric_td_t* sys) {
+  oric_tap_direct = false;
+  oric_tap_ring_head = 0;
+  oric_tap_ring_tail = 0;
   CHIPS_ASSERT(sys && sys->valid);
   if (sys->sd_file_open) {
     f_close(&sys->sd_file);
